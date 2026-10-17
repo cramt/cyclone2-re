@@ -37,3 +37,11 @@ route-fuzz out +seeds:
 cram-check +dirs:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
     tools/cram/target/release/cram check specimens/route/empty/build/output_files/top.rbf {{dirs}}
+
+# Post-fit Verilog netlist: <dir>/build/simulation/modelsim/top.vo
+netlist dir:
+    cd {{dir}}/build && {{justfile_directory()}}/tools/quartus.sh quartus_sh --tcl_eval exec quartus_eda top --simulation --tool=modelsim --format=verilog
+
+# LE/LAB fuzz: one design per seed (generate, compile, back-annotate, netlist)
+lab-fuzz out +seeds:
+    for s in {{seeds}}; do echo $s; done | xargs -P 6 -I{} tools/lab_fuzz.sh {{out}}/l{} {} 6

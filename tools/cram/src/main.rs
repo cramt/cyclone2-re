@@ -10,6 +10,7 @@ fn usage() -> ! {
         "usage (CRAM_DEVINFO overrides the Quartus devinfo/cycloneii dir):
   cram check <empty.rbf> <design dir>...   predicted routing bits vs RBF diff
   cram addr <flat>...                      flat CRAM address -> frame:bit
+  cram routing <design dir>                routing bits an rcf sets, as fN:B
   cram assemble <empty.rbf> <design dir> <out.rbf> [--io <training dir>...]
       empty RBF + modelled bits, check words recomputed. --io adds the
       I/O bits every training design shares (same pin set), learned as is.
@@ -228,6 +229,23 @@ fn main() -> Result<()> {
                 let mut fixed = r.clone();
                 fixed.fix_crcs();
                 println!("{f}: {}", if fixed == r { "ok" } else { "check words differ" });
+            }
+        }
+        ("routing", [dir]) => {
+            // Exploration aid: every routing bit an rcf sets, plus what didn't
+            // resolve, for scripts that model the rest.
+            let dev = Device::load(&devinfo(), "magellan4")?;
+            let sigs = cram::rcf::read(&Path::new(dir).join("build/top.rcf"))?;
+            let (bits, skipped) = cram::route::bits(&dev, &sigs)?;
+            for b in bits {
+                println!(
+                    "{} enc={} high={} strange={} cff={}",
+                    addr::frame_bit(b.flat_address), b.use_encoded_setting, b.is_encoded_bit_high,
+                    b.is_strangely_encoded, b.is_cff_bit
+                );
+            }
+            for r in skipped {
+                eprintln!("skipped {r:?}");
             }
         }
         ("addr", flats) => {

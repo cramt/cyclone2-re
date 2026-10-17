@@ -20,6 +20,20 @@ pub fn element_enum(kind: &str) -> Option<i16> {
         "C4" => 269,
         "C16" => 275,
         "CLK_BUFFER" => 289,
+        // Global clock path, matched against the graph on the counter
+        // design: pin buffer -> clkctrl in (513) .. clkctrl out (515) ->
+        // GCLK driver (292) -> quadrant spine `GCLK<n>CS..` (293) -> row
+        // clock `RCLK..` (294) -> LAB clock buffer (560). 513 -> 515 is
+        // inside the clkctrl block, not a graph edge.
+        "CLKBUF_IN" => 513,
+        "CLKBUF_OUT" => 515,
+        "GLOBAL_CLK_H" => 292,
+        "GLOBAL_CLK_V" => 293,
+        "LAB_CLK" => 294,
+        "BLK_CLK_BUF" => 560,
+        // An LE's direct feedback into its own LAB: index = LE number.
+        // Edge-less in the graph; the LE input mux selects it.
+        "LOCAL_LINE" => 43,
         _ => return None,
     })
 }

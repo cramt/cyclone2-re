@@ -69,25 +69,41 @@ fn parse_resource(s: &str) -> Option<Resource> {
 pub fn parse(text: &str) -> Result<Vec<Signal>> {
     let mut sigs: Vec<Signal> = Vec::new();
     let mut cur: Option<Signal> = None;
+    // Index of the resource the next dest hangs off: the last resource, or
+    // the labelled one a `branch_point` jumps back to.
+    let mut at: Option<usize> = None;
+    let mut labels: Vec<(String, usize)> = Vec::new();
     for (n, line) in text.lines().enumerate() {
         let l = line.trim();
         if let Some(rest) = l.strip_prefix("signal_name = ") {
             let name = rest.trim_end_matches('{').trim().to_string();
             cur = Some(Signal { name, resources: vec![], dests: vec![] });
+            at = None;
+            labels.clear();
         } else if l == "}" {
             if let Some(s) = cur.take() {
                 sigs.push(s);
             }
         } else if let Some(s) = cur.as_mut() {
             let body = l.trim_end_matches(';');
+            let bad = || format!("line {}: unrecognised rcf statement {l:?}", n + 1);
             if body.starts_with("dest") {
-                let from = s.resources.len().checked_sub(1);
-                let d = parse_dest(body, from).with_context(|| format!("line {}: bad dest {l:?}", n + 1))?;
+                let d = parse_dest(body, at).with_context(|| format!("line {}: bad dest {l:?}", n + 1))?;
                 s.dests.push(d);
+            } else if let Some(rest) = body.strip_prefix("label = ") {
+                // `label = Label_KIND:XxYySzIi, KIND:XxYySzIi`: a resource
+                // that later `branch_point`s can name.
+                let (label, res) = rest.split_once(", ").with_context(bad)?;
+                s.resources.push(parse_resource(res).with_context(bad)?);
+                at = Some(s.resources.len() - 1);
+                labels.push((label.to_string(), s.resources.len() - 1));
+            } else if let Some(label) = body.strip_prefix("branch_point = ") {
+                at = Some(labels.iter().rev().find(|(l, _)| l == label).with_context(bad)?.1);
             } else if let Some(r) = parse_resource(body) {
                 s.resources.push(r);
-            } else if !body.is_empty() && !body.starts_with("branch_point") {
-                bail!("line {}: unrecognised rcf statement {l:?}", n + 1);
+                at = Some(s.resources.len() - 1);
+            } else if !body.is_empty() {
+                bail!(bad());
             }
         }
     }

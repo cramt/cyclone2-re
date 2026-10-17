@@ -2,3 +2,4 @@ target/
 result
 build/
 /specimens/
+__pycache__/
