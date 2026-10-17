@@ -2,7 +2,8 @@
 
 How Quartus II 13.0sp1 stores its device databases
 (`quartus/common/devinfo/<family>/ddb_*.ddb`), and how `tools/ddb` decodes
-the Cyclone II routing graph, wire names and routing configuration bits.
+the Cyclone II routing graph, wire names, routing configuration bits and
+the package pin map.
 
 Every claim has a tag:
 
@@ -290,6 +291,80 @@ table parses.
 libddb_bcm2bits.so reads `*.bcm.xml` files. No such files exist for
 `cycloneii`, so it plays no part in this family. **[inf]**
 
+### `pad` and `pkg`: package pins to IOE locations
+
+`ddb_<die>_pad.ddb` holds the die's pads and `ddb_<die><package>_pkg.ddb`
+(e.g. `magellan4fbga672`) the package balls. `tools/ddb/src/pins.rs`
+decodes both to the exact end of the body. **[obs]**
+
+Both use one generic "info body" schema. Each object has fixed arrays
+`m_bool_data`, `m_int_data[N]`, `m_string_data[N]`, `m_vec_int_data[N]`,
+`m_2d_int_data[N]` and so on. The slot index is a per-class enum whose
+names are not stored. A `*_enum_is_valid` bit vector per array says which
+slots are populated. **[obs]** for the layout, **[inf]** for the enum
+reading. Encodings seen here, in addition to the ones above: **[obs]**
+
+- `std::vector<bool>`: an i32 bit count, then `ceil(n/32)` i32 words.
+  Each word is a delta with the same rule as other vector elements.
+- Fixed arrays such as `m_int_data[53]` chain like vectors: element 0
+  references element 0 of the previous object of the class, and element
+  *i* references element *i-1*.
+- Strings are an i32 `n`, then exactly `n` bytes. The trace shows a NUL,
+  but none is stored. `n == 0` is an empty slot.
+- `vector<vector<int>>`: a row count, then per row a count and chained
+  ints. `vector<double>`: a count and raw f64s.
+- `map<int,int>` and `map<string,int>`: keys and values chain from 0.
+- `DEV_PIN::m_pad_id_list[0]` references 0, not the previous pin's list.
+  So the vector rule above is not universal.
+- Enum vectors (`m_io_standard_enums`, `m_current_set`) are one i32 per
+  element, which the trace prints twice.
+
+Deferred bodies come in this order: `DEV_IO_STANDARD_DESC` (each just
+`ptr m_body`), `DEV_IO_STANDARD_DESC_BODY`, the default `DEV_PAD_BODY`,
+`DEV_PAD` (each `ptr m_body`), then one `DEV_PAD_BODY` per pad. **[obs]**
+
+```
+DEV_PAD_INFO_BODY                        # magellan4: 487 pads
+  ptr vector m_pad_list -> DEV_PAD, ptr m_default_pad_body,
+  info arrays, m_ids_by_global_id, m_ids_by_string,
+  m_io_standards (39), m_io_standards_by_string,
+  m_default_io_standards_by_enum[105], m_io_standard_enums, ptr m_io_rules
+DEV_PAD_BODY
+  i32 m_id (delta), ptr m_default_pad_body, bool[155], int[53],
+  string[20], 2d_int[10], string_hash[4], 5 valid vectors,
+  ptr vector m_io_standards, ptr m_io_standards_by_enum[105]
+DEV_PKG_INFO_BODY                        # fbga672: 672 pins
+  ptr vector m_pin_list -> DEV_PIN, info arrays, 11 valid vectors,
+  m_ids_by_string
+DEV_PIN (bodies follow in id order)
+  i32 m_id (delta), bool[46], int[24], string[12], vec_int[7],
+  string_hash[4], 5 valid vectors, vector<int> m_pad_id_list
+```
+
+Slots that have a meaning:
+
+| member | meaning | tag |
+|--------|---------|-----|
+| `DEV_PIN::m_string_data[0]` | ball name (`N25`) | [obs] |
+| `DEV_PIN::m_string_data[1]` | power function of balls with no pad (`VCCD_PLL3`) | [inf] |
+| `DEV_PIN::m_pad_id_list` | `DEV_PAD_BODY::m_id` of the bonded pad, 0 or 1 entries | [obs] |
+| `DEV_PAD_BODY::m_id` | pad id, equal to the fit report's "Pad Number" | [obs] |
+| `DEV_PAD_BODY::m_string_data[1]` | `X<x>Y<y>SUB_LOC<z>`: IOE tile and index | [obs] |
+| `DEV_PAD_BODY::m_string_data[3]` | `Row I/O`, `Column I/O`, `Dedicated Clock`, `Dedicated Programming`, `JTAG` | [obs] |
+| `DEV_PAD_BODY::m_string_data[4..6]` | function (`LVDS151n`), pad name (`P0B0`), second name (`LVDSB0A`) | [inf] |
+| `DEV_PAD_BODY::m_int_data[0]` | global id, the key of `m_ids_by_global_id` | [obs] |
+| `DEV_PAD_BODY::m_int_data[2]` | I/O bank - 1 | [obs] |
+| `DEV_PAD_BODY::m_int_data[6]` | differential partner pad id | [inf] |
+| `DEV_PAD_BODY::m_int_data[11]` | VREF pad id of the group (0 on VREF pads) | [inf] |
+| `DEV_PAD_BODY::m_int_data[12]` | VREF group, 0..15 | [inf] |
+| `DEV_PAD_BODY::m_io_standards` | supported I/O standards, named by `DEV_IO_STANDARD_DESC_BODY::m_string_data[0]` | [inf] |
+
+On fbga672, 487 balls have one pad each and 185 have none (power,
+ground, PLL supplies). `ddb pins <devinfo> magellan4 fbga672` prints the
+join as CSV. `ddb_cycloneii_pad.ddb` uses the same schema with no pads.
+It holds 5 family-wide I/O standards and is not needed for the pin map.
+All 26 Cyclone II `pad` and `pkg` files decode. **[obs]**
+
 ## Verification
 
 `tools/ddb` has two commands that print a canonical text form:
@@ -302,6 +377,13 @@ same form from the `PDB_ASCII_DUMP` trace. For magellan4:
 - ASM nodes (376,788 lines) are identical. The trace prints the -1 flag
   values as 32-bit `FFFFFFFF`, so it is compared after normalizing that.
   **[obs]**
+- `pad` and `pkg` (magellan4, fbga672, and `cycloneii_pad`): `ddb
+  pins-trace` prints every decoded value in trace order. The output is
+  identical to the trace's value column (128,949, 47,392 and 1,105
+  values). **[obs]** Checked against all 91 fit reports in
+  `specimens/`: the pad number, bank and I/O type of every ball (91 x
+  672) match. The X/Y/cell of every placed I/O (2,035 rows, 465 of the
+  487 user balls) also match. **[obs]**
 - `icname` was not in either trace, because neither tool loads it. Its
   decode consumes the body to the exact last byte, and both maps have the
   same 149,468 keys. **[obs]** that it parses cleanly. It is not checked
@@ -329,4 +411,5 @@ ASM node count equal to element count, and all edges inside the graph.
 - `DEV_ELEMENT_ENUM` value names.
 - The meaning of exclusion groups, and of the
   `use_encoded_setting`/`is_encoded_bit_high` bits (about 1.5% of bits).
-- `asmdb` (block config muxes), `place`, `timing`, `pad` and `pkg`.
+- `asmdb` (block config muxes), `place` and `timing`.
+- Most `pad`/`pkg` info-body slots. Only the ones in the table above are named.

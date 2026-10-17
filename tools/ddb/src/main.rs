@@ -1,4 +1,4 @@
-use ddb::{asm, container, export, pdb, routing};
+use ddb::{asm, container, export, pdb, pins, routing};
 
 use anyhow::{bail, Result};
 use std::path::PathBuf;
@@ -12,7 +12,10 @@ fn usage() -> ! {
                                       (die e.g. magellan4 = EP2C35)
   ddb routing-stats <routing.ddb>
   ddb routing-canon <routing.ddb>     canonical text, see verify/README.md
-  ddb asm-canon <asm.ddb>"
+  ddb asm-canon <asm.ddb>
+  ddb pins <devinfo> <die> <package>  package pin -> pad -> IOE x,y,z as CSV
+                                      (e.g. magellan4 fbga672)
+  ddb pins-trace <pad|pkg ddb>        value stream, see verify/README.md"
     );
     std::process::exit(2)
 }
@@ -75,6 +78,40 @@ fn main() -> Result<()> {
                 }
                 writeln!(o)?;
             }
+        }
+        ("pins", [dir, die, package]) => {
+            use std::io::Write;
+            let (pkg, pad) = pins::load(&PathBuf::from(dir), die, package)?;
+            let mut o = std::io::BufWriter::new(std::io::stdout().lock());
+            writeln!(o, "pin,pad,x,y,z,bank,io_type,pad_name,function,alt_name,pin_function")?;
+            let q = |s: &Option<String>| match s.as_deref() {
+                Some(s) if s.contains(',') => format!("\"{s}\""),
+                s => s.unwrap_or("").to_string(),
+            };
+            for m in pins::join(&pkg, &pad)? {
+                let p = m.pin;
+                if m.pads.is_empty() {
+                    writeln!(o, "{},,,,,,,,,,{}", p.name, q(&p.function))?;
+                }
+                for pad in &m.pads {
+                    let loc = pad.loc.map_or(",,".into(), |(x, y, z)| format!("{x},{y},{z}"));
+                    writeln!(o, "{},{},{loc},{},{},{},{},{},{}", p.name, pad.id, pad.bank, q(&pad.io_type),
+                        q(&pad.pad_name), q(&pad.function), q(&pad.alt_name), q(&p.function))?;
+                }
+            }
+        }
+        ("pins-trace", [f]) => {
+            // Decoded values in PDB_ASCII_DUMP order, one per line, for
+            // diffing against verify/pins_trace_tokens.py.
+            let d = container::Ddb::open(&PathBuf::from(f))?;
+            let names: Vec<String> = pdb::parse_class_table(&d.footer)?.into_iter().map(|c| c.name).collect();
+            let mut log = Vec::new();
+            if names.iter().any(|n| n == "DEV_PIN") {
+                pins::parse_pkg(&d, Some(&mut log))?;
+            } else {
+                pins::parse_pad(&d, Some(&mut log))?;
+            }
+            println!("{}", log.join("\n"));
         }
         ("export", [dir, die, out]) => {
             export::run(&PathBuf::from(dir), die, &PathBuf::from(out))?;

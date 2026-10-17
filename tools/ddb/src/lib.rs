@@ -8,4 +8,5 @@ pub mod device;
 pub mod export;
 pub mod icname;
 pub mod pdb;
+pub mod pins;
 pub mod routing;

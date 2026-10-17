@@ -19,4 +19,14 @@ ddb asm-canon $DEVINFO/ddb_magellan4_asm.ddb > rust.txt
 python3 asm_trace_canon.py routeasm_dump.txt | sed 's/4294967295/255/g' | cmp - rust.txt
 ```
 
+For the package and pad databases, the comparison is on the value stream,
+and then against the fit reports:
+
+```sh
+ddb pins-trace $DEVINFO/ddb_magellan4_pad.ddb | cmp - <(python3 pins_trace_tokens.py pad_dump.txt)
+ddb pins-trace $DEVINFO/ddb_magellan4fbga672_pkg.ddb | cmp - <(python3 pins_trace_tokens.py pkg_dump.txt)
+ddb pins $DEVINFO magellan4 fbga672 > pins.csv
+python3 pins_fit_check.py pins.csv $(find specimens -name '*.fit.rpt')
+```
+
 The trace is Quartus-derived, so it never leaves `specimens/`.
