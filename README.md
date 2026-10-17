@@ -23,13 +23,70 @@ fills in what fuzzing can't reach cheaply, mainly routing graph topology.
 
 ## Findings
 
-- **`.ddb` device files are not encrypted.** Each is a small plaintext
-  header followed by standard XZ streams (`tools/unxz_ddb.py`). Codename for
-  the Cyclone II family is `magellan`; `magellan4` is the EP2C35. Unpacked
-  EP2C35 data: `icname` 7.2 MB (every wire name, e.g. `H4R35C66RT[0]`),
-  `routing` 28.5 MB (routing graph, mux inputs like `IP:LEIM*`), `asm` 75.6 MB
-  (assembler data, likely the config-bit map). Unpack with
-  `python3 tools/unxz_ddb.py <file> specimens/ddb`.
+### Device database
+
+Format details, with every claim marked observed or inferred, are in
+[docs/ddb-format.md](docs/ddb-format.md). The reader is `tools/ddb` (Rust).
+
+- **`.ddb` files are Quartus "PDB" object serialization**, not encrypted.
+  Each file is a 0x74-byte header, then a compressed body, then a
+  compressed footer. The header holds the version, the compression type
+  and the section bounds. The compression is xz, or for `asmdb`, `lei`,
+  `pwr` and `blkrba` zlib without a final block. The footer is a class
+  table that lists class id, size, schema hash and name. The body has no
+  type tags. Values are little-endian. Most fields are deltas against the
+  same field of the previous object. Pointers are new-object or relative
+  back-references, and pointed-to object bodies are written at the end.
+  All 180 `cycloneii/*.ddb` files parse (`ddb info`).
+- **Quartus prints its own annotated trace of every database it reads.**
+  Put `PDB_ASCII_DUMP=on` in `quartus.ini` (read by
+  `PDB_SEGMENT_BASE::serialize_begin`). Quartus then prints every field
+  with its C++ member name. This trace is what the decoders are checked
+  against.
+- **Routing graph decoded (EP2C35 = `magellan4`):** 376,788 routing
+  elements, 3,104,196 fanout edges, 210,403 shared element templates. Each
+  element has x/y, a template, and a fanout base. The template has type,
+  z/index, length, direction, and fanout offsets relative to that base.
+  Every edge targets a routing element. No edges are marked redundant.
+  Fan-in (mux inputs) is the inverse of the fanout lists. The elements and
+  templates match the Quartus trace byte for byte.
+- **Wire names decoded:** `icname` is two `map<global id, string>`, the
+  ic name and the schematic name. 149,468 named wires such as
+  `H4R35C66RT[0]`, `V16_C1UP_R[1]` and `GCLK0CS49B`. Global id bit 31
+  marks a routing element, and the low bits are the routing element index.
+  The other 227,320 elements are probably block ports (`IP:LEIM*`,
+  `LL:*`, `LO:*`; inferred).
+  Their names live in the part of the routing body that isn't decoded yet.
+- **`asm` maps every routing connection to configuration bits.** There is
+  one ASM node per routing element. Bit group *k* of a node is the bit set
+  that turns on fanout edge *k* of that element
+  (`get_destination_bit_group`). Extra groups past the fanout count are
+  "exclusion groups", whose meaning is unknown. 7,996,500 bits in total.
+  Edges carry 2 bits (2,956,721 edges), 1 bit (114,656), 9 bits (13,824) or
+  none (18,995). Each bit is a "flat CRAM address" (6,715 to 6,707,826)
+  with encoding flags. About 1.5% of bits use the "encoded setting" flags.
+  All 376,788 ASM nodes match the trace exactly.
+- **Open: the flat CRAM address to RBF frame/bit mapping.** One clue:
+  take addresses mod 2701 (2701 = 2725 frames minus the 24 odd frames
+  0-23). For the muxes feeding LAB X64Y19, the residues cluster in 27-75.
+  For X63Y19 they cluster in 62-109. That is +35 per step of X decreasing,
+  and phase 1 found 35 frames per LAB column. The LUT at X64 is in frames
+  2676-2679, which is 2724 - frame = 45-48. So the address looks like
+  `row × 2701 + (2724 - frame)`. That is inferred. The row-to-frame-bit
+  mapping isn't pinned down: the empty-vs-one-LUT diff has too few routing
+  bits to separate the candidates.
+- `asmdb` (`ASMDB_DIE`, `ASMDB_*_MUX`, `ASMDB_BLOCK_INFO`, in
+  libdb_asmdb.so) looks like the per-block (LE, IOE, RAM) mux-to-bit
+  table. Inferred: only its class table is decoded. `bcm2bits` is unused
+  for Cyclone II, because no `.bcm.xml` files exist for this family.
+- Export: `cargo run --release --manifest-path tools/ddb/Cargo.toml --
+  export ~/altera/13.0sp1/quartus/common/devinfo/cycloneii magellan4
+  specimens/db/magellan4` writes `nodes.csv`, `edges.csv` (dst, src,
+  src_edge, asm bits), `icname.csv` and `summary.json` in about 20 s.
+  These files are Quartus-derived and stay in `specimens/`. The same
+  decoder runs on all six Cyclone II dies, `magellan1` through `magellan6`,
+  with 62,667 to 776,454 routing elements. Only magellan4 is checked
+  against the trace.
 
 ### Oracle harness (phase 0)
 
@@ -167,9 +224,9 @@ database and our own tools.
 |---|-------|--------|
 | 0 | Sandboxed oracle: generated design → chipsmith → `.sof`/`.rbf`, no network | done: `tools/oracle.sh`, verified offline |
 | 1 | Container format: SOF/RBF framing, header, CRC, frame layout | RBF layout and frame CRC known for frames 24+; frames 0-23 and the header option words not decoded; SOF not looked at |
-| 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | device DB unpacked, not parsed |
+| 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | ddb format decoded; routing elements carry x/y, block lookup tables not yet decoded |
 | 3 | Logic: LUT truth tables, FF modes, carry chains | LUT bits and X/Y/N strides from 4 positions; FF/carry not started |
-| 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | not started |
+| 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | graph + wire names + per-edge config bits decoded from ddb; CRAM address mapping open |
 | 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | not started |
 | 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | not started |
 | 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | not started |
