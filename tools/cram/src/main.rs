@@ -9,7 +9,11 @@ fn usage() -> ! {
     eprintln!(
         "usage (CRAM_DEVINFO overrides the Quartus devinfo/cycloneii dir):
   cram check <empty.rbf> <design dir>...   predicted routing bits vs RBF diff
-  cram addr <flat>...                      flat CRAM address -> frame:bit"
+  cram addr <flat>...                      flat CRAM address -> frame:bit
+  cram assemble <empty.rbf> <design dir> <out.rbf> [--io <training dir>...]
+      empty RBF + modelled bits, check words recomputed. --io adds the
+      I/O bits every training design shares (same pin set), learned as is.
+  cram compare <ours.rbf> <quartus.rbf>    categorised bit diff"
     );
     std::process::exit(2)
 }
@@ -85,8 +89,9 @@ fn check(empty: &Path, dirs: &[String]) -> Result<()> {
         add("lut hit", lut_ones.intersection(&obs).count());
         // LUT entries predicted to stay 0 but observed flipped.
         add("lut wrong", lut_all.difference(&lut_ones).filter(|b| obs.contains(b)).count());
-        add("le mux predicted", mux_ones.len());
-        add("le mux hit", mux_ones.intersection(&obs).count());
+        add("le/io mux predicted", mux_ones.len());
+        add("le/io mux hit", mux_ones.intersection(&obs).count());
+        add("io outputs unmodelled", des.unmodelled_io_outs + des.io_outs.iter().filter(|o| le::io_out_mux(o.x, o.z, o.line).is_none()).count());
         let used: HashSet<(u32, u32)> = des.les.iter().map(|l| (l.loc.x, l.loc.y)).collect();
         let used_le_rows: HashSet<u32> = des
             .les
@@ -108,11 +113,113 @@ fn check(empty: &Path, dirs: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// I/O-region bits (frames 0-23, top/bottom I/O rows) that differ from
+/// the empty design identically in every training design.
+fn shared_io_bits(base: &Rbf, dirs: &[String]) -> Result<Vec<(FrameBit, bool)>> {
+    let mut common: Option<HashSet<(FrameBit, bool)>> = None;
+    for d in dirs {
+        let rbf = Rbf::read(&Path::new(d).join("build/output_files/top.rbf"))?;
+        let s: HashSet<(FrameBit, bool)> =
+            base.diff(&rbf).into_iter().filter(|b| is_io_region(*b)).map(|b| (b, rbf.get(b))).collect();
+        common = Some(match common {
+            None => s,
+            Some(c) => c.intersection(&s).copied().collect(),
+        });
+    }
+    let mut v: Vec<_> = common.unwrap_or_default().into_iter().collect();
+    v.sort();
+    Ok(v)
+}
+
+fn is_io_region(b: FrameBit) -> bool {
+    if (b.frame as usize) < rbf::FIRST_CRC_FRAME {
+        return true;
+    }
+    addr::flat(b).map_or(true, |f| {
+        let row = f / addr::COLUMNS;
+        row < le::lab_row(35) || row >= le::lab_row(1) + le::LAB_ROWS
+    })
+}
+
+fn assemble(empty: &Path, dir: &Path, out: &Path, io_dirs: &[String]) -> Result<()> {
+    let dev = Device::load(&devinfo(), "magellan4")?;
+    let mut rbf = Rbf::read(empty)?;
+    let des = Design::from_fuzz_dir(&dev, dir)?;
+    let (lut, mux) = des.le_ones();
+    for b in des.routing.iter().chain(&lut).chain(&mux) {
+        rbf.set(*b, true);
+    }
+    let io = shared_io_bits(&Rbf::read(empty)?, io_dirs)?;
+    for &(b, v) in &io {
+        rbf.set(b, v);
+    }
+    rbf.fix_crcs();
+    // Frames 0-23's check words don't follow the CRC of the other frames
+    // and we can't compute them yet. If every training design has the same
+    // bytes there (true for a fixed pin set), take them verbatim.
+    if let Some(first) = io_dirs.first() {
+        let t = Rbf::read(&Path::new(first).join("build/output_files/top.rbf"))?;
+        let mut same = true;
+        for d in &io_dirs[1..] {
+            let o = Rbf::read(&Path::new(d).join("build/output_files/top.rbf"))?;
+            same &= (0..rbf::FIRST_CRC_FRAME).all(|f| o.frame_bytes(f) == t.frame_bytes(f));
+        }
+        if same {
+            for f in 0..rbf::FIRST_CRC_FRAME {
+                rbf.set_frame_bytes(f, t.frame_bytes(f));
+            }
+            eprintln!("frames 0-23 identical in all {} training designs: copied with their check words", io_dirs.len());
+        }
+    }
+    std::fs::write(out, rbf.bytes())?;
+    eprintln!(
+        "assembled {}: {} routing, {} LUT, {} LE/IO-mux bits, {} learned I/O bits",
+        out.display(), des.routing.len(), lut.len(), mux.len(), io.len()
+    );
+    Ok(())
+}
+
+fn compare(ours: &Rbf, theirs: &Rbf) {
+    let total = ours.bytes().iter().zip(theirs.bytes()).map(|(a, b)| (a ^ b).count_ones()).sum::<u32>();
+    let data = ours.diff(theirs);
+    let mut cats = BTreeMap::<&str, usize>::new();
+    for b in &data {
+        let k = if (b.frame as usize) < rbf::FIRST_CRC_FRAME {
+            "frames 0-23"
+        } else if is_io_region(*b) {
+            "top/bottom I/O rows"
+        } else {
+            "core"
+        };
+        *cats.entry(k).or_default() += 1;
+    }
+    let bad_crc = (rbf::FIRST_CRC_FRAME..rbf::FRAMES).filter(|&f| !ours.frame_crc_ok(f)).count();
+    println!(
+        "{} differing bits in the whole file; {} in frame data {:?}; header/check-word/tail bits {}; \
+         frames with a bad check word in ours: {bad_crc}",
+        total, data.len(), cats, total as usize - data.len()
+    );
+    if std::env::var_os("CRAM_VERBOSE").is_some() {
+        for b in &data {
+            println!("  {b} ours={} quartus={}", u8::from(ours.get(*b)), u8::from(theirs.get(*b)));
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else { usage() };
     match (cmd.as_str(), &args[1..]) {
         ("check", [empty, dirs @ ..]) if !dirs.is_empty() => check(Path::new(empty), dirs)?,
+        ("assemble", [empty, dir, out, rest @ ..]) => {
+            let io_dirs = match rest {
+                [] => &[][..],
+                [flag, dirs @ ..] if flag == "--io" => dirs,
+                _ => usage(),
+            };
+            assemble(Path::new(empty), Path::new(dir), Path::new(out), io_dirs)?
+        }
+        ("compare", [ours, theirs]) => compare(&Rbf::read(Path::new(ours))?, &Rbf::read(Path::new(theirs))?),
         ("addr", flats) => {
             for f in flats {
                 println!("{f} {}", addr::frame_bit(f.parse()?));

@@ -90,6 +90,16 @@ impl Rbf {
         }
     }
 
+    /// Data and check word of one frame.
+    pub fn frame_bytes(&self, frame: usize) -> &[u8] {
+        let o = Self::frame_off(frame);
+        &self.0[o..o + FRAME_BYTES]
+    }
+    pub fn set_frame_bytes(&mut self, frame: usize, bytes: &[u8]) {
+        let o = Self::frame_off(frame);
+        self.0[o..o + FRAME_BYTES].copy_from_slice(bytes);
+    }
+
     /// Does frame `frame`'s stored check word match its data?
     pub fn frame_crc_ok(&self, frame: usize) -> bool {
         let o = Self::frame_off(frame) + FRAME_DATA_BYTES;

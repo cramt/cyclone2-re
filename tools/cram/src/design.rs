@@ -29,9 +29,21 @@ pub struct Le {
     pub outputs: [bool; 2],
 }
 
+/// An output pin's data input, in a bottom-row I/O tile: (x, z, LAB-local
+/// line feeding IO_DATAOUT).
+#[derive(Debug, Clone, Copy)]
+pub struct IoOut {
+    pub x: u32,
+    pub z: u32,
+    pub line: u32,
+}
+
 pub struct Design {
     pub routing: Vec<FrameBit>,
     pub les: Vec<Le>,
+    pub io_outs: Vec<IoOut>,
+    /// Output pins outside the bottom I/O row: their mux isn't modelled.
+    pub unmodelled_io_outs: usize,
     pub skipped_resources: usize,
     /// LEs whose input net isn't in the rcf (first-generation fuzz design
     /// r1, before `keep`, renamed its cells): mask unknown, left out.
@@ -105,12 +117,23 @@ impl Design {
             }
             les.push(Le { loc, mask: buffer_mask(port), inputs, outputs });
         }
-        Ok(Design { routing, les, skipped_resources: skipped.len(), unknown_luts })
+        let (mut io_outs, mut unmodelled_io_outs) = (Vec::new(), 0);
+        for s in &sigs {
+            for (i, r) in s.resources.iter().enumerate().filter(|(_, r)| r.kind == "IO_DATAOUT") {
+                match i.checked_sub(1).map(|j| &s.resources[j]) {
+                    Some(l) if l.kind == "LOCAL_INTERCONNECT" && r.y == 0 => {
+                        io_outs.push(IoOut { x: r.x as u32, z: r.z as u32, line: l.index as u32 })
+                    }
+                    _ => unmodelled_io_outs += 1,
+                }
+            }
+        }
+        Ok(Design { routing, les, io_outs, unmodelled_io_outs, skipped_resources: skipped.len(), unknown_luts })
     }
 
-    /// Non-routing bits this design sets to 1, by what sets them, relative
-    /// to an empty design (all routing off, every LUT stored as 0 = mask
-    /// 0xffff since LUT bits are stored inverted, no LE muxes on).
+    /// Non-routing bits this design sets to 1, as (LUT, LE and I/O mux),
+    /// relative to an empty design (all routing off, every LUT stored as
+    /// 0 = mask 0xffff since LUT bits are stored inverted, no muxes on).
     pub fn le_ones(&self) -> (HashSet<FrameBit>, HashSet<FrameBit>) {
         let (mut lut, mut mux) = (HashSet::new(), HashSet::new());
         for l in &self.les {
@@ -129,6 +152,11 @@ impl Design {
                     let (df, row) = le::output_enable(k as u32);
                     mux.insert(le_frame_bit(l.loc, df, row));
                 }
+            }
+        }
+        for o in &self.io_outs {
+            for (frame, row) in le::io_out_mux(o.x, o.z, o.line).into_iter().flatten() {
+                mux.insert(to_frame_bit(frame, row));
             }
         }
         (lut, mux)
