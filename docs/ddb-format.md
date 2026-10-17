@@ -222,9 +222,12 @@ Graph facts for magellan4. **[obs]**
 - Fan-in is not stored. It is the inverse of the fanout lists, and the
   `DYGR_ROUTE_FANIN_MAP` is built at load time. `tools/ddb` computes it.
 
-Not yet known: what `m_element_enum` values mean. They index
-`DEV_ELEMENT_ENUM`. For example, 264 is H4 wires and 43 is an
-edge-less per-tile element. **[inf]** The names are in
+Not yet known: the names of most `m_element_enum` values. They index
+`DEV_ELEMENT_ENUM`. The ones that rcf back-annotation names: 45
+`LE_BUFFER`, 276 `LOCAL_INTERCONNECT`, 264 `R4` (H4), 268 `R24`, 269
+`C4` (V4), 275 `C16`, 289 `CLK_BUFFER`. **[obs]**: with this table every
+consecutive resource pair in 17 fuzz rcf files is exactly one fanout edge.
+43 is an edge-less per-LE element. **[inf]** The names are in
 `DEV_ELEMENT_DESC` (hdr ddb).
 
 ### `asm`: `DYGR_ROUTE_ASM_INFO_BODY`: routing bits
@@ -271,9 +274,12 @@ The groups correspond to fanout edges of the **source** element.
   frames 0-23. The residues for the muxes feeding LAB X64Y19 are 27-75.
   For X63Y19 they are 62-109: +35 per X step, which equals the RBF's 35
   frames per LAB column. The LUT of X64Y19 is in frames 2676-2679, and
-  2724 - frame = 45-48 falls in that band. **[obs]** So the address is
-  probably `row * 2701 + (2724 - frame)`. **[inf]** The row to RBF frame-bit
-  mapping is not known yet.
+  2724 - frame = 45-48 falls in that band. **[obs]**
+- The full map, `frame = 2724 - addr % 2701` and `row = addr / 2701` laid
+  out as 8 bit-in-byte lanes, predicts every routing bit of the 17
+  routing fuzz designs with no misses and no polarity errors. **[obs]**
+  The formula and the LAB/LE layout in those rows are in the README
+  ("CRAM addressing"); `tools/cram/src/addr.rs` implements it.
 
 `DEV_ASM_INFO` in libddb_dev.so is different. It holds the `asmdb` and
 `asmdb_dirt` files (`ASMDB_DIE`, `ASMDB_*_MUX`, `ASMDB_BLOCK_INFO`),
@@ -323,5 +329,4 @@ ASM node count equal to element count, and all edges inside the graph.
 - `DEV_ELEMENT_ENUM` value names.
 - The meaning of exclusion groups, and of the
   `use_encoded_setting`/`is_encoded_bit_high` bits (about 1.5% of bits).
-- How the flat CRAM address maps to RBF frame and bit positions.
 - `asmdb` (block config muxes), `place`, `timing`, `pad` and `pkg`.

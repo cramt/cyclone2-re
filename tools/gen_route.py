@@ -12,9 +12,11 @@ synthesis can't collapse the chain.
 import pathlib, random, sys
 
 # EP2C35 LAB grid, read off the routing graph (LE output nodes): X 1..64 minus
-# the M4K/multiplier columns, Y 1..35.
+# the M4K/multiplier columns, Y 1..35, minus a 6x4 hole at X1-6 Y19-22 that
+# has no LEs (the fitter rejects locations there as illegal).
 LAB_X = [x for x in range(1, 65) if x not in (13, 26, 39, 52)]
 LAB_Y = list(range(1, 36))
+HOLE = {(x, y) for x in range(1, 7) for y in range(19, 23)}
 
 # DE2 user manual pinout.
 SW = ["N25", "N26", "P25", "AE14", "AF14", "AD13", "AC13", "C13", "B13", "A13",
@@ -32,7 +34,7 @@ used = set()
 def place():
     while True:
         loc = (rng.choice(LAB_X), rng.choice(LAB_Y), rng.randrange(0, 32, 2))
-        if loc not in used:
+        if loc not in used and loc[:2] not in HOLE:
             used.add(loc)
             return loc
 

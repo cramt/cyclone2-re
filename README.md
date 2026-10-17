@@ -66,15 +66,8 @@ Format details, with every claim marked observed or inferred, are in
   none (18,995). Each bit is a "flat CRAM address" (6,715 to 6,707,826)
   with encoding flags. About 1.5% of bits use the "encoded setting" flags.
   All 376,788 ASM nodes match the trace exactly.
-- **Open: the flat CRAM address to RBF frame/bit mapping.** One clue:
-  take addresses mod 2701 (2701 = 2725 frames minus the 24 odd frames
-  0-23). For the muxes feeding LAB X64Y19, the residues cluster in 27-75.
-  For X63Y19 they cluster in 62-109. That is +35 per step of X decreasing,
-  and phase 1 found 35 frames per LAB column. The LUT at X64 is in frames
-  2676-2679, which is 2724 - frame = 45-48. So the address looks like
-  `row × 2701 + (2724 - frame)`. That is inferred. The row-to-frame-bit
-  mapping isn't pinned down: the empty-vs-one-LUT diff has too few routing
-  bits to separate the candidates.
+- **The flat CRAM address maps to RBF frame/bit**, solved below in
+  [CRAM addressing](#cram-addressing-phase-4).
 - `asmdb` (`ASMDB_DIE`, `ASMDB_*_MUX`, `ASMDB_BLOCK_INFO`, in
   libdb_asmdb.so) looks like the per-block (LE, IOE, RAM) mux-to-bit
   table. Inferred: only its class table is decoded. `bcm2bits` is unused
@@ -206,14 +199,121 @@ every pair differed in exactly 16 data bits:
 - **X is the frame axis.** One LAB column spans 35 frames. Frames run
   left to right, since X64 sits near the end of the stream.
 - **Y and N are in-frame.** All 16 LUT bits use bit 3 of their byte. N+2
-  moves 4 bytes and Y+1 moves 70 bytes. A frame has 312 bytes, so 70 bytes
-  per row fits only about 4.5 rows. A guess for the bit-in-byte axis: it
-  selects one of 8 vertical bands of about 4-5 rows, which makes
-  8 × 4.5 ≈ 36 rows, close to the EP2C35 row count. That needs Y samples
-  from far apart in the column to confirm or rule out.
+  moves 4 bytes and Y+1 moves 70 bytes. Resolved in phase 4: the in-frame
+  axis is CRAM rows, 70 per LAB row, laid out as 8 bit-in-byte lanes of
+  311 rows. See [CRAM addressing](#cram-addressing-phase-4).
 - Each location has one sample per axis, so linearity is assumed, not
   shown. Routing was deterministic. Compiling at a fixed location without an
   `.rcf` gave the same data bits as the `.rcf`-pinned build.
+
+### CRAM addressing (phase 4)
+
+Method: `tools/gen_route.py` makes designs of 6 chains × 6 WYSIWYG buffer
+LUTs, each LUT pinned to a random LAB (`(* keep *)` wires add free-placed
+buffers too). `tools/route_fuzz.sh` compiles each one, back-annotates the
+routing to `top.rcf` and diffs the RBF against an empty baseline (one
+output pin tied low, built with the same pinned USERCODE).
+`tools/cram` (Rust) resolves every rcf resource to a routing element,
+every consecutive pair to a fanout edge, and every edge to its `asm` bit
+group, then maps flat addresses to RBF bits. 24 designs were generated:
+17 compiled (7 failed in the fitter, presumably on illegal random
+placements), r1 used an earlier generator.
+
+**The mapping, observed** (every predicted bit is a flipped bit, see the
+numbers below):
+
+```
+column = flat % 2701            row = flat / 2701
+frame  = 2724 - column          (frames 24..2724; frames 0-23 never appear)
+rows 0..2175:   lane = row / 311, byte = 311 - row % 311
+rows 2176..:    lane = 7,         byte = 311 - (row - 2176)
+frame bit = byte * 8 + lane     (LSB first, the order rbfdiff prints)
+```
+
+- A frame is 8 "lanes" (bit position within the byte), each a run of
+  CRAM rows laid out from the end of the frame backwards. Lane 6 holds
+  one row fewer than the others (rows 2175 and 2176 are both observed,
+  in lanes 6 and 7). Why is open.
+- Routing bits are active high: 0 in the empty design, 1 when the edge
+  is used. 0 polarity errors in ~10,000 predicted bits.
+- `rcf` resource kinds are routing element types: `LE_BUFFER` 45,
+  `LOCAL_INTERCONNECT` 276, `R4` 264, `R24` 268, `C4` 269, `C16` 275,
+  `CLK_BUFFER` 289, with `S` = z and `I` = index. With that table every
+  consecutive pair of resources in every fuzz rcf is exactly one edge.
+  `IO_DATAOUT` and LE inputs are not routing elements: the graph ends at
+  `LOCAL_INTERCONNECT`.
+
+**Tile layout in CRAM rows/frames, observed:**
+
+- LAB row Y (1-35) owns 70 CRAM rows starting at `18 + 70·(35 − Y)`.
+  Rows 0-17 are the top I/O row; rows 2468-2487 the bottom one. This is
+  the phase-1 "70 bytes per Y": 70 rows, which wrap from one lane into the
+  next. No band structure is needed.
+- In a LAB, LEs 0-7 take 4 rows each counting up from the LAB's first
+  row; LEs 8-15 are their mirror image about the LAB's last row; rows
+  32-37 sit between.
+- The first LUT frame of LAB column X is 78 + the widths of columns 1..X−1:
+  35 frames per LAB column, 166 per M4K/multiplier column (13, 26, 52), 27
+  for the centre column (39), plus 4 unexplained frames before columns 16
+  and 50 (mirror images about the centre). Checked on all 60 LAB columns.
+- LUT entry `p = A + 2B + 4C + 8D` of `LCCOMB_X_Y_N`: frame
+  `lut_frame(X) + 3 − B − 2C`, LE row `3 − A − 2D` (mirrored for LEs
+  8-15). Stored inverted, so an unused LUT is 0 (mask 0xffff). This
+  matches the phase-1 table and all 918 LUTs of the fuzz designs.
+
+**LE- and I/O-level muxes, learned tables** (not from the device DB):
+
+- Local line → LUT input: 2 bits per input, at frames −13..−2 from the
+  LUT, rows 2-3 of the LE. A two-level mux: the first bit picks one of 8
+  (frame, row) slots, the second one of 3 frames. Learned per (local line
+  index, physical port) by `tools/explore/le_mux_table.py` into
+  `tools/cram/src/le_mux_table.rs`. Only DATAC and DATAD inputs are
+  covered, because the fitter put every one-input buffer on C or D.
+- LE output enable: rcf `LE_BUFFER` index n + k drives a net ⇒ one bit at
+  frame `lut_frame + 5`, LE row 0 (k = 0) or 3 (k = 1). 648 of 648 cases.
+- Bottom-row output pins: 2 bits per pin selecting the local line into
+  `IO_DATAOUT`, rows 2476-2477. Odd z mirrors even z about
+  `lut_frame(X) − 2`. Learned table (`io_mux_table.py`); lines 2, 15, 17,
+  19 and above 20 unseen.
+- Everything else seen is I/O configuration for the pin set (6 inputs,
+  6 outputs): 260 bits in frames 0-23 and 21 bits in the bottom I/O row,
+  identical in every fuzz design. Not decoded.
+
+**Validation** (`cram check`). Tables learned from r2, r3, r6-r15
+("train"). Held out with the same pin set (6 in, 6 out): r16, r17, r19,
+r22, r25 and h1001-h1006 from a later batch. Held out with a different
+pin set (4 in, 4 out, 4 × 8 LUT chains): g2001-g2006.
+
+| | train (12) | held out (11) | other pins (6) |
+|---|---|---|---|
+| routing bits predicted / observed | 6,949 / 6,949 | 6,272 / 6,272 | 3,409 / 3,409 |
+| LUT bits predicted / observed | 5,184 / 5,184 | 4,752 / 4,752 | 2,496 / 2,496 |
+| LE + I/O mux bits predicted / observed | 2,088 / 2,088 | 1,914 / 1,914 | 982 / 982 |
+| residual: frames 0-23 (pin I/O config) | 3,120 | 2,860 | 1,116 |
+| residual: top/bottom I/O rows | 252 | 231 | 80 |
+| residual anywhere else | 0 | 0 | 0 |
+
+Every residual is I/O: 260 bits in frames 0-23 plus 21 in the bottom
+row per design for the 6/6 pin set, constant across designs. One g2006
+output used local line 2, which isn't in the learned I/O table.
+
+**Round trip, observed:** `cram assemble` starts from the empty RBF, sets
+routing + LUT + LE/I-O mux bits from the model, copies the pin-set I/O
+config (bits shared by all training designs, plus frames 0-23 verbatim
+with their check words, which we can't compute), and recomputes the frame
+and header check words. **All 11 held-out same-pin-set designs come
+out byte-identical to Quartus's RBF** (I/O config from the 12 training
+designs). For the other pin set, with the I/O config learned
+leave-one-out from the other five g designs, 5 of 6 are byte-identical;
+g2006 differs in 2 data bits (its output on local line 2, missing from
+the table; the two bits are where the table's line-mod-3 pattern puts
+them) plus the check words of the 2 frames.
+
+What that does and doesn't show: routing, LUT placement/contents and the
+CRAM address map are modelled from first principles plus the device DB.
+The LE input mux and output-pin mux are learned lookup tables. The pin
+I/O config and frames 0-23 are copied, so a design with a different pin
+set needs its own training designs.
 
 Nothing from Quartus gets redistributed. The repo ships only the derived bit
 database and our own tools.
@@ -223,10 +323,10 @@ database and our own tools.
 | # | Phase | Status |
 |---|-------|--------|
 | 0 | Sandboxed oracle: generated design → chipsmith → `.sof`/`.rbf`, no network | done: `tools/oracle.sh`, verified offline |
-| 1 | Container format: SOF/RBF framing, header, CRC, frame layout | RBF layout and frame CRC known for frames 24+; frames 0-23 and the header option words not decoded; SOF not looked at |
-| 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | ddb format decoded; routing elements carry x/y, block lookup tables not yet decoded |
-| 3 | Logic: LUT truth tables, FF modes, carry chains | LUT bits and X/Y/N strides from 4 positions; FF/carry not started |
-| 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | graph + wire names + per-edge config bits decoded from ddb; CRAM address mapping open |
+| 1 | Container format: SOF/RBF framing, header, CRC, frame layout | RBF layout and frame CRC known for frames 24+, `cram assemble` writes valid check words; frames 0-23 (content and check scheme) and the header option words not decoded; SOF not looked at |
+| 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | LAB grid and its CRAM frame/row placement observed; M4K/multiplier/clock columns known only as frame widths |
+| 3 | Logic: LUT truth tables, FF modes, carry chains | LUT bits for every LAB/LE position (observed on 918 LUTs); LE input mux for C/D and output enables as learned tables; FF/carry not started |
+| 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clock networks untested |
 | 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | not started |
 | 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | not started |
 | 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | not started |

@@ -1,7 +1,7 @@
 //! Uncompressed EP2C35 raw bitstream (`.rbf`) container, as observed from
 //! Quartus 13.0sp1 output (README "Container format").
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
 pub const HEADER_BYTES: usize = 0x186;
 pub const FRAME_DATA_BYTES: usize = 312;
@@ -63,7 +63,7 @@ impl Rbf {
         Ok(Rbf(bytes))
     }
     pub fn read(path: &std::path::Path) -> Result<Self> {
-        Self::parse(std::fs::read(path)?)
+        Self::parse(std::fs::read(path).with_context(|| path.display().to_string())?)
     }
     pub fn bytes(&self) -> &[u8] {
         &self.0
