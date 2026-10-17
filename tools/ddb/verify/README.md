@@ -29,4 +29,16 @@ ddb pins $DEVINFO magellan4 fbga672 > pins.csv
 python3 pins_fit_check.py pins.csv $(find specimens -name '*.fit.rpt')
 ```
 
+The block configuration tables (`asmdb`) are in the `quartus_asm` trace,
+between its 9th and 10th `HEADER: m_version_number` (the asmdb section,
+about 288k lines). Mux bit lists in id order, arch group headers and block
+instance lists must match exactly (17,290 muxes, 529 arch groups, 4 block
+types for magellan4):
+
+```sh
+ddb asmdb-canon $DEVINFO/ddb_magellan4_asmdb.ddb > rust.txt
+python3 asmdb_canon.py asmdb_trace.txt > trace.canon
+python3 asmdb_semantic.py trace.canon | cmp - rust.txt
+```
+
 The trace is Quartus-derived, so it never leaves `specimens/`.

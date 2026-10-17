@@ -3,6 +3,7 @@
 //! routing connection sets. Where those addresses land in a bitstream is the
 //! `cram` crate's business.
 pub mod asm;
+pub mod asmdb;
 pub mod container;
 pub mod device;
 pub mod export;

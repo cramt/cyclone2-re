@@ -1,4 +1,4 @@
-use ddb::{asm, container, export, pdb, pins, routing};
+use ddb::{asm, asmdb, container, export, pdb, pins, routing};
 
 use anyhow::{bail, Result};
 use std::path::PathBuf;
@@ -13,6 +13,7 @@ fn usage() -> ! {
   ddb routing-stats <routing.ddb>
   ddb routing-canon <routing.ddb>     canonical text, see verify/README.md
   ddb asm-canon <asm.ddb>
+  ddb asmdb-canon <asmdb.ddb>         mux/arch-group/block summary, see verify/README.md
   ddb pins <devinfo> <die> <package>  package pin -> pad -> IOE x,y,z as CSV
                                       (e.g. magellan4 fbga672)
   ddb pins-trace <pad|pkg ddb>        value stream, see verify/README.md"
@@ -62,6 +63,32 @@ fn main() -> Result<()> {
                 for v in &t.fanout_offsets { write!(o, " {v}")?; }
                 write!(o, " |")?;
                 for v in &t.fanout_to_positions { write!(o, " {v}")?; }
+                writeln!(o)?;
+            }
+        }
+        ("asmdb-canon", [f]) => {
+            // Mux bit lists in id order, then arch groups, then block infos,
+            // for diffing against verify/asmdb_canon.py | asmdb_semantic.py.
+            use std::io::Write;
+            let d = container::Ddb::open(&PathBuf::from(f))?;
+            let db = asmdb::parse(&d.body)?;
+            let mut o = std::io::BufWriter::new(std::io::stdout().lock());
+            for m in &db.muxes {
+                write!(o, "M")?;
+                for b in &m.bits { write!(o, " {b}")?; }
+                writeln!(o)?;
+            }
+            for g in &db.arch_groups {
+                let paths: Vec<usize> = g.paths().iter().map(Vec::len).collect();
+                writeln!(o, "A {} {} {} {:?}", g.arch_type, g.block_type, g.group_index, paths)?;
+            }
+            for b in &db.block_infos {
+                let n: usize = b.block_lists.values().map(Vec::len).sum();
+                writeln!(o, "B {} {} {} {:?}", b.block_type, b.num_ram_cols, n, b.simple_block_lists)?;
+            }
+            for b in &db.block_infos {
+                write!(o, "L")?;
+                for v in b.block_lists.values().flatten() { write!(o, " {}", *v as i32)?; }
                 writeln!(o)?;
             }
         }

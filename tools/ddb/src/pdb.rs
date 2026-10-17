@@ -84,6 +84,12 @@ impl<'a> Cursor<'a> {
         Ok(String::from_utf8_lossy(self.bytes(n as usize)?).into_owned())
     }
 
+    /// asmdb's strings: i32 exact length (no NUL accounting), 0 = none.
+    pub fn std_string_opt(&mut self) -> Result<Option<String>> {
+        let s = self.std_string()?;
+        Ok((!s.is_empty()).then_some(s))
+    }
+
     pub fn ptr(&mut self) -> Result<Ptr> {
         Ok(Ptr::decode(self.i32()?))
     }
