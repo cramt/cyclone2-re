@@ -2,9 +2,10 @@
 //! from the `ddb` crate; this crate owns where they land in an RBF.
 pub mod addr;
 pub mod design;
+pub mod lab;
 pub mod le;
 mod io_mux_table;
-mod le_mux_table;
+pub mod le_mux_table;
 pub mod rbf;
 pub mod rcf;
 pub mod route;

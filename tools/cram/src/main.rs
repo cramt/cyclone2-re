@@ -11,6 +11,8 @@ fn usage() -> ! {
   cram check <empty.rbf> <design dir>...   predicted routing bits vs RBF diff
   cram addr <flat>...                      flat CRAM address -> frame:bit
   cram routing <design dir>                routing bits an rcf sets, as fN:B
+  cram lab-check                           asmdb LAB tables vs the fuzz-fit LUT
+                                           geometry and learned LE input mux
   cram assemble <empty.rbf> <design dir> <out.rbf> [--io <training dir>...]
       empty RBF + modelled bits, check words recomputed. --io adds the
       I/O bits every training design shares (same pin set), learned as is.
@@ -209,6 +211,61 @@ fn compare(ours: &Rbf, theirs: &Rbf) {
     }
 }
 
+fn asmdb() -> Result<ddb::asmdb::Asmdb> {
+    let p = devinfo().join("ddb_magellan4_asmdb.ddb");
+    ddb::asmdb::parse(&ddb::container::Ddb::open(&p)?.body)
+}
+
+/// The asmdb's LUT bit positions must be the fuzz-fit `le::lut_bit` model
+/// for every LE of every LAB, and its LE input mux must reproduce every
+/// entry of the learned table.
+fn lab_check() -> Result<()> {
+    use ddb::asmdb::arch;
+    let lab = cram::lab::LabDb::new(&asmdb()?)?;
+    let lut = lab.feature(arch::LE_LUT_FUNCTION, -1)?;
+    let mut n = 0;
+    for x in 1..=64 {
+        for y in 1..=35 {
+            if le::lut_frame(x).is_none() || (x <= 6 && (19..=22).contains(&y)) {
+                continue;
+            }
+            for l in 0..16u32 {
+                for i in 0..16 {
+                    // asmdb mux setting i is truth-table entry 15 - i.
+                    let (frame, row) = le::lut_bit(x, y, 2 * l, 15 - i).unwrap();
+                    let fb = addr::frame_bit(lab.flat(x, y, lut.paths[l as usize][0][i as usize])?);
+                    anyhow::ensure!(fb == addr::frame_bit(row * addr::COLUMNS + addr::LAST_FRAME - frame),
+                        "LUT X{x} Y{y} LE{l} bit {i}: asmdb {fb}, model f{frame} row {row}");
+                    n += 1;
+                }
+            }
+        }
+    }
+    println!("{} LABs; {n} LUT bits agree with the fuzz-fit model", lab.labs());
+    let (mut ok, mut tot) = (0, 0);
+    for &(line, port, bits) in cram::le_mux_table::LE_INPUT_MUX {
+        let f = lab.feature(arch::LE_LUT_INPUT, port as i32)?;
+        for l in 0..16u32 {
+            let got: std::collections::BTreeSet<_> = f
+                .source_bits(l as usize, line as usize)?
+                .into_iter()
+                .map(|o| addr::frame_bit(lab.flat(30, 10, o).unwrap()))
+                .collect();
+            let want: std::collections::BTreeSet<_> = bits
+                .iter()
+                .map(|&(df, r)| {
+                    let (frame, row) = le::le_bit(30, 10, 2 * l, df as i32, r as u32).unwrap();
+                    addr::frame_bit(row * addr::COLUMNS + addr::LAST_FRAME - frame)
+                })
+                .collect();
+            tot += 1;
+            ok += usize::from(got == want);
+        }
+    }
+    println!("learned LE input mux: {ok}/{tot} (line, port, LE) entries reproduced by the asmdb");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else { usage() };
@@ -248,6 +305,7 @@ fn main() -> Result<()> {
                 eprintln!("skipped {r:?}");
             }
         }
+        ("lab-check", []) => lab_check()?,
         ("addr", flats) => {
             for f in flats {
                 println!("{f} {}", addr::frame_bit(f.parse()?));
