@@ -215,9 +215,10 @@ routing to `top.rcf` and diffs the RBF against an empty baseline (one
 output pin tied low, built with the same pinned USERCODE).
 `tools/cram` (Rust) resolves every rcf resource to a routing element,
 every consecutive pair to a fanout edge, and every edge to its `asm` bit
-group, then maps flat addresses to RBF bits. 24 designs were generated:
-17 compiled (7 failed in the fitter, presumably on illegal random
-placements), r1 used an earlier generator.
+group, then maps flat addresses to RBF bits. Of r1-r25, 17 compiled; the
+other 7 drew a LAB in the X1-6 Y19-22 hole, which has no LEs and which
+the fitter rejects (the generator now skips it). r1 predates `keep` and
+is left out. h1001-h1006 and g2001-g2006 came later, all compiled.
 
 **The mapping, observed** (every predicted bit is a flipped bit, see the
 numbers below):
@@ -235,7 +236,7 @@ frame bit = byte * 8 + lane     (LSB first, the order rbfdiff prints)
   one row fewer than the others (rows 2175 and 2176 are both observed,
   in lanes 6 and 7). Why is open.
 - Routing bits are active high: 0 in the empty design, 1 when the edge
-  is used. 0 polarity errors in ~10,000 predicted bits.
+  is used. 0 polarity errors in 16,630 predicted routing bits.
 - `rcf` resource kinds are routing element types: `LE_BUFFER` 45,
   `LOCAL_INTERCONNECT` 276, `R4` 264, `R24` 268, `C4` 269, `C16` 275,
   `CLK_BUFFER` 289, with `S` = z and `I` = index. With that table every
