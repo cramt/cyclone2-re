@@ -16,6 +16,7 @@ build-tools:
 
 test:
     cargo test --manifest-path tools/rbfdiff/Cargo.toml
+    cargo test --manifest-path tools/cram/Cargo.toml
 
 # Write <dir>/build/top.rcf (routing) and LC/pin locations into top.qsf
 back-annotate dir:
@@ -27,3 +28,12 @@ lut-bits out loc rcf:
     tools/gen_lut.py {{out}}/base 6996 {{loc}} {{rcf}}
     for i in $(seq 0 15); do tools/gen_lut.py {{out}}/flip$i $(printf %04x $((0x6996 ^ (1 << i)))) {{loc}} {{rcf}}; done
     ls -d {{out}}/base {{out}}/flip* | xargs -P 6 -n 1 tools/oracle.sh
+
+# Routing fuzz: one design per seed (generate, compile, back-annotate, diff vs empty)
+route-fuzz out +seeds:
+    for s in {{seeds}}; do echo $s; done | xargs -P 6 -I{} tools/route_fuzz.sh {{out}}/r{} {} 6 6
+
+# Predicted (routing + LUT + LE/IO mux) vs observed bits for fuzz design dirs
+cram-check +dirs:
+    cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
+    tools/cram/target/release/cram check specimens/route/empty/build/output_files/top.rbf {{dirs}}
