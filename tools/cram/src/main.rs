@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use cram::{addr, rbf::{FrameBit, Rbf}, rcf, route};
+use cram::{addr, design::Design, le, rbf::{self, FrameBit, Rbf}};
 use ddb::device::Device;
 
 fn usage() -> ! {
@@ -20,84 +20,92 @@ fn devinfo() -> PathBuf {
     })
 }
 
-/// Which tiles each flat-address column / row holds, read off the asm bits
-/// of every routing element: lets residual bits be named by tile.
-struct TileIndex {
-    col_x: HashMap<u32, HashSet<i16>>,
-    row_y: HashMap<u32, HashSet<i16>>,
-}
-
-impl TileIndex {
-    fn new(dev: &Device) -> Self {
-        let (mut col_x, mut row_y) = (HashMap::<u32, HashSet<i16>>::new(), HashMap::<u32, HashSet<i16>>::new());
-        for (i, e) in dev.routing.elements.iter().enumerate() {
-            for b in &dev.asm[i].bits {
-                col_x.entry(b.flat_address % addr::COLUMNS).or_default().insert(e.x);
-                row_y.entry(b.flat_address / addr::COLUMNS).or_default().insert(e.y);
-            }
-        }
-        TileIndex { col_x, row_y }
+/// Residual bit -> coarse category, by CRAM geometry alone.
+fn categorise(b: FrameBit, used: &HashSet<(u32, u32)>, used_le_rows: &HashSet<u32>, hist: &mut BTreeMap<i64, usize>) -> &'static str {
+    if (b.frame as usize) < rbf::FIRST_CRC_FRAME {
+        return "frames 0-23";
+    }
+    let Some(flat) = addr::flat(b) else { return "unaddressable" };
+    let row = flat / addr::COLUMNS;
+    let frame = b.frame as u32;
+    if row < le::lab_row(35) || row >= le::lab_row(1) + le::LAB_ROWS {
+        return "top/bottom I/O rows";
+    }
+    let y = 35 - (row - le::lab_row(35)) / le::LAB_ROWS;
+    let off = row - le::lab_row(y);
+    // Nearest LAB column by LUT anchor.
+    let Some((x, d)) = (1..=64)
+        .filter_map(|x| le::lut_frame(x).map(|f| (x, frame as i64 - f as i64)))
+        .min_by_key(|(_, d)| d.abs())
+    else {
+        unreachable!()
+    };
+    if !(LAB_SPAN.0..LAB_SPAN.1).contains(&d) {
+        return "non-LAB column";
+    }
+    if !used.contains(&(x, y)) {
+        return "LAB, unused";
+    }
+    *hist.entry(d).or_default() += 1;
+    if (32..38).contains(&off) {
+        "used LAB, rows 32-37"
+    } else if used_le_rows.contains(&row) {
+        "used LE rows, not LUT"
+    } else {
+        "used LAB, other LE rows"
     }
 }
 
-fn design_bits(dev: &Device, dir: &Path) -> Result<(HashSet<FrameBit>, usize, usize)> {
-    let sigs = rcf::read(&dir.join("build/top.rcf"))?;
-    let (bits, skipped) = route::bits(dev, &sigs)?;
-    let n = bits.len();
-    Ok((bits.iter().map(|b| addr::frame_bit(b.flat_address)).collect(), n, skipped.len()))
-}
+/// Frames of a LAB column relative to its first LUT frame. Guess, refined
+/// from the residual histogram.
+const LAB_SPAN: (i64, i64) = (-17, 18);
 
 fn check(empty: &Path, dirs: &[String]) -> Result<()> {
     let dev = Device::load(&devinfo(), "magellan4")?;
     let base = Rbf::read(empty)?;
-    let tiles = TileIndex::new(&dev);
-    let mut tot = BTreeMap::<&str, usize>::new();
+    let mut tot = BTreeMap::<String, usize>::new();
+    let mut hist = BTreeMap::<i64, usize>::new();
     for d in dirs {
         let dir = Path::new(d);
-        let (pred, nbits, skipped) = design_bits(&dev, dir)?;
+        let des = Design::from_fuzz_dir(&dev, dir)?;
         let rbf = Rbf::read(&dir.join("build/output_files/top.rbf"))?;
         let obs: HashSet<FrameBit> = base.diff(&rbf).into_iter().collect();
-        let hit = pred.iter().filter(|b| obs.contains(b)).count();
-        // Routing bits are active high: every hit should be 0 -> 1.
-        let wrong_pol = pred.iter().filter(|b| obs.contains(b) && !rbf.get(**b)).count();
-        let mut cats = BTreeMap::<&str, usize>::new();
-        for b in obs.difference(&pred) {
-            *cats.entry(categorise(&tiles, *b)).or_default() += 1;
+        let routing: HashSet<FrameBit> = des.routing.iter().copied().collect();
+        let lut_all = des.lut_bits();
+        let (lut_ones, mux_ones) = des.le_ones();
+        let ones: HashSet<FrameBit> = routing.iter().chain(&lut_ones).chain(&mux_ones).copied().collect();
+        let mut c = BTreeMap::<String, usize>::new();
+        let mut add = |k: &str, v: usize| *c.entry(k.to_string()).or_default() += v;
+        add("observed", obs.len());
+        add("luts with unknown mask", des.unknown_luts);
+        add("routing predicted", routing.len());
+        add("routing hit", routing.intersection(&obs).count());
+        add("routing polarity err", routing.iter().filter(|b| obs.contains(b) && !rbf.get(**b)).count());
+        add("lut predicted", lut_ones.len());
+        add("lut hit", lut_ones.intersection(&obs).count());
+        // LUT entries predicted to stay 0 but observed flipped.
+        add("lut wrong", lut_all.difference(&lut_ones).filter(|b| obs.contains(b)).count());
+        add("le mux predicted", mux_ones.len());
+        add("le mux hit", mux_ones.intersection(&obs).count());
+        let used: HashSet<(u32, u32)> = des.les.iter().map(|l| (l.loc.x, l.loc.y)).collect();
+        let used_le_rows: HashSet<u32> = des
+            .les
+            .iter()
+            .flat_map(|l| (0..16).map(move |p| le::lut_bit(l.loc.x, l.loc.y, l.loc.n, p).unwrap().1))
+            .collect();
+        for b in obs.iter().filter(|b| !ones.contains(b) && !lut_all.contains(b)) {
+            add(&format!("residual: {}", categorise(*b, &used, &used_le_rows, &mut hist)), 1);
         }
-        println!(
-            "{d}: predicted {} ({nbits} asm bits, {skipped} rcf resources not routing), observed {}, \
-             predicted&observed {hit}, predicted-only {}, polarity errors {wrong_pol}, unexplained {:?}",
-            pred.len(), obs.len(), pred.len() - hit, cats
-        );
-        *tot.entry("predicted").or_default() += pred.len();
-        *tot.entry("hit").or_default() += hit;
-        *tot.entry("observed").or_default() += obs.len();
-        for (k, v) in cats {
+        println!("{d}: {c:?}");
+        for (k, v) in c {
             *tot.entry(k).or_default() += v;
         }
     }
-    println!("total: {tot:?}");
+    println!("total over {} designs: {tot:#?}", dirs.len());
+    if std::env::var_os("CRAM_VERBOSE").is_some() {
+        println!("residual frame - lut_frame histogram (used LABs): {hist:?}");
+    }
     Ok(())
-}
-
-/// Name the tile a bit sits in, from which routing elements' asm bits share
-/// its column and row. Inverse of `addr::frame_bit` for frames >= 24.
-fn categorise(t: &TileIndex, b: FrameBit) -> &'static str {
-    if (b.frame as usize) < cram::rbf::FIRST_CRC_FRAME {
-        return "frames0-23";
-    }
-    let Some(flat) = addr::flat(b) else { return "unaddressable" };
-    let col = flat % addr::COLUMNS;
-    let row = flat / addr::COLUMNS;
-    let xs = t.col_x.get(&col);
-    let ys = t.row_y.get(&row);
-    let edge_x = xs.is_some_and(|s| s.iter().any(|&x| x == 0 || x == 65));
-    let edge_y = ys.is_some_and(|s| s.iter().any(|&y| y == 0 || y == 36));
-    match (xs, ys) {
-        (None, _) | (_, None) => "no-routing-tile",
-        _ if edge_x || edge_y => "io-tile",
-        _ => "core-tile",
-    }
 }
 
 fn main() -> Result<()> {

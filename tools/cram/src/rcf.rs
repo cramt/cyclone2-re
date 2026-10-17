@@ -18,13 +18,37 @@ pub struct Resource {
     pub index: i16,
 }
 
+/// `dest = ( cell, PORT ), route_port = PHYS;`: the net reaches `cell`'s
+/// logical input `port`, physically entering on `route_port` (the fitter
+/// permutes LUT inputs). It always follows the resource that feeds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dest {
+    pub cell: String,
+    pub port: String,
+    pub route_port: Option<String>,
+    /// Index into `Signal::resources` of the resource feeding this sink.
+    pub from: Option<usize>,
+}
+
+impl Dest {
+    pub fn physical_port(&self) -> &str {
+        self.route_port.as_deref().unwrap_or(&self.port)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Signal {
     pub name: String,
     pub resources: Vec<Resource>,
-    /// Raw `dest = ...` lines; the LE/IO input mux they imply is block
-    /// config (asmdb), not routing.
-    pub dests: Vec<String>,
+    pub dests: Vec<Dest>,
+}
+
+fn parse_dest(s: &str, from: Option<usize>) -> Option<Dest> {
+    let inner = s.split_once('(')?.1;
+    let (cell_port, rest) = inner.split_once(')')?;
+    let (cell, port) = cell_port.split_once(',')?;
+    let route_port = rest.split("route_port = ").nth(1).map(|p| p.trim().to_string());
+    Some(Dest { cell: cell.trim().to_string(), port: port.trim().to_string(), route_port, from })
 }
 
 fn parse_resource(s: &str) -> Option<Resource> {
@@ -57,7 +81,9 @@ pub fn parse(text: &str) -> Result<Vec<Signal>> {
         } else if let Some(s) = cur.as_mut() {
             let body = l.trim_end_matches(';');
             if body.starts_with("dest") {
-                s.dests.push(body.to_string());
+                let from = s.resources.len().checked_sub(1);
+                let d = parse_dest(body, from).with_context(|| format!("line {}: bad dest {l:?}", n + 1))?;
+                s.dests.push(d);
             } else if let Some(r) = parse_resource(body) {
                 s.resources.push(r);
             } else if !body.is_empty() && !body.starts_with("branch_point") {
@@ -85,6 +111,9 @@ mod tests {
         .unwrap();
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].resources[1], Resource { kind: "R4".into(), x: 58, y: 19, z: 0, index: 16 });
-        assert_eq!(s[0].dests.len(), 1);
+        assert_eq!(
+            s[0].dests,
+            vec![Dest { cell: "lut".into(), port: "DATAD".into(), route_port: Some("DATAB".into()), from: Some(1) }]
+        );
     }
 }
