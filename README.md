@@ -21,6 +21,16 @@ that differ in exactly one feature, and the bits that change are the bits for
 that feature. Reverse engineering of the shipped Quartus device data with REA
 fills in what fuzzing can't reach cheaply, mainly routing graph topology.
 
+## Findings
+
+- **`.ddb` device files are not encrypted.** Each is a small plaintext
+  header followed by standard XZ streams (`tools/unxz_ddb.py`). Codename for
+  the Cyclone II family is `magellan`; `magellan4` is the EP2C35. Unpacked
+  EP2C35 data: `icname` 7.2 MB (every wire name, e.g. `H4R35C66RT[0]`),
+  `routing` 28.5 MB (routing graph, mux inputs like `IP:LEIM*`), `asm` 75.6 MB
+  (assembler data, likely the config-bit map). Unpack with
+  `python3 tools/unxz_ddb.py <file> specimens/ddb`.
+
 Nothing from Quartus gets redistributed. The repo ships only the derived bit
 database and our own tools.
 
@@ -30,7 +40,7 @@ database and our own tools.
 |---|-------|--------|
 | 0 | Sandboxed oracle: generated design → chipsmith → `.sof`/`.rbf`, no network | not started |
 | 1 | Container format: SOF/RBF framing, header, CRC, frame layout | not started |
-| 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | not started |
+| 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | device DB unpacked, not parsed |
 | 3 | Logic: LUT truth tables, FF modes, carry chains | not started |
 | 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | not started |
 | 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | not started |
