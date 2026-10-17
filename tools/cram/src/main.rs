@@ -13,7 +13,8 @@ fn usage() -> ! {
   cram assemble <empty.rbf> <design dir> <out.rbf> [--io <training dir>...]
       empty RBF + modelled bits, check words recomputed. --io adds the
       I/O bits every training design shares (same pin set), learned as is.
-  cram compare <ours.rbf> <quartus.rbf>    categorised bit diff"
+  cram compare <ours.rbf> <quartus.rbf>    categorised bit diff
+  cram verify <rbf>...                     do all check words match?"
     );
     std::process::exit(2)
 }
@@ -193,7 +194,8 @@ fn compare(ours: &Rbf, theirs: &Rbf) {
         };
         *cats.entry(k).or_default() += 1;
     }
-    let bad_crc = (rbf::FIRST_CRC_FRAME..rbf::FRAMES).filter(|&f| !ours.frame_crc_ok(f)).count();
+    let bad_crc = (rbf::FIRST_CRC_FRAME..rbf::FRAMES).filter(|&f| !ours.frame_crc_ok(f)).count()
+        + (0..rbf::REP_FRAMES).filter(|&f| !ours.rep_frame_ok(f)).count();
     println!(
         "{} differing bits in the whole file; {} in frame data {:?}; header/check-word/tail bits {}; \
          frames with a bad check word in ours: {bad_crc}",
@@ -220,6 +222,14 @@ fn main() -> Result<()> {
             assemble(Path::new(empty), Path::new(dir), Path::new(out), io_dirs)?
         }
         ("compare", [ours, theirs]) => compare(&Rbf::read(Path::new(ours))?, &Rbf::read(Path::new(theirs))?),
+        ("verify", files) if !files.is_empty() => {
+            for f in files {
+                let r = Rbf::read(Path::new(f))?;
+                let mut fixed = r.clone();
+                fixed.fix_crcs();
+                println!("{f}: {}", if fixed == r { "ok" } else { "check words differ" });
+            }
+        }
         ("addr", flats) => {
             for f in flats {
                 println!("{f} {}", addr::frame_bit(f.parse()?));

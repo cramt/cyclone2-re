@@ -10,9 +10,14 @@ pub const FRAMES: usize = 2725;
 pub const TAIL_BYTES: usize = 36;
 pub const TOTAL_BYTES: usize = HEADER_BYTES + FRAMES * FRAME_BYTES + TAIL_BYTES;
 pub const FRAME_BITS: usize = FRAME_DATA_BYTES * 8;
-/// Frames 0-23 carry a check word we can't compute yet (probably the left
-/// I/O column with its own scheme), so they're never rewritten.
+/// Raw frames 0-23 aren't 24 frames: they are 6 ordinary 314-byte frames
+/// (312 data bytes + the same CRC-16 as every other frame) with every byte
+/// sent 4 times in a row. Checked on every uncompressed RBF we have. So
+/// the stream really holds 6 + 2701 frames; `FrameBit` keeps addressing
+/// raw frames, `RepBit` the 6 replicated ones.
 pub const FIRST_CRC_FRAME: usize = 24;
+pub const REP_FRAMES: usize = 6;
+pub const REP_COPIES: usize = 4;
 
 /// Header bytes covered by the header check word, and where it is stored.
 const HDR_CRC_RANGE: std::ops::Range<usize> = 0x4d..0x75;
@@ -48,6 +53,19 @@ fn crc16(init: u16, data: &[u8]) -> u16 {
 /// of every observed design check, not a constant found in Quartus.
 fn frame_crc(data: &[u8]) -> u16 {
     crc16(0xfe54, data)
+}
+
+/// A data bit of one of the 6 replicated frames, LSB first like `FrameBit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RepBit {
+    pub frame: u8,
+    pub bit: u16,
+}
+
+impl std::fmt::Display for RepBit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "x{}:{}", self.frame, self.bit)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -100,15 +118,69 @@ impl Rbf {
         self.0[o..o + FRAME_BYTES].copy_from_slice(bytes);
     }
 
+    /// Offset of the first copy of byte `byte` (0..314, check word
+    /// included) of replicated frame `frame`.
+    fn rep_off(frame: usize, byte: usize) -> usize {
+        HEADER_BYTES + (frame * FRAME_BYTES + byte) * REP_COPIES
+    }
+    /// One replicated frame, de-replicated: 312 data bytes + check word.
+    pub fn rep_frame(&self, frame: usize) -> Vec<u8> {
+        (0..FRAME_BYTES).map(|b| self.0[Self::rep_off(frame, b)]).collect()
+    }
+    fn set_rep_byte(&mut self, frame: usize, byte: usize, v: u8) {
+        let o = Self::rep_off(frame, byte);
+        self.0[o..o + REP_COPIES].fill(v);
+    }
+    pub fn rep_get(&self, b: RepBit) -> bool {
+        self.0[Self::rep_off(b.frame as usize, b.bit as usize / 8)] >> (b.bit % 8) & 1 == 1
+    }
+    pub fn rep_set(&mut self, b: RepBit, v: bool) {
+        let (f, byte) = (b.frame as usize, b.bit as usize / 8);
+        let old = self.0[Self::rep_off(f, byte)];
+        let m = 1u8 << (b.bit % 8);
+        self.set_rep_byte(f, byte, if v { old | m } else { old & !m });
+    }
+    /// Are all 4 copies of every byte equal and is the check word right?
+    pub fn rep_frame_ok(&self, frame: usize) -> bool {
+        let copies_ok = (0..FRAME_BYTES).all(|b| {
+            let o = Self::rep_off(frame, b);
+            self.0[o..o + REP_COPIES].iter().all(|&x| x == self.0[o])
+        });
+        let d = self.rep_frame(frame);
+        copies_ok && frame_crc(&d[..FRAME_DATA_BYTES]) == u16::from_le_bytes([d[312], d[313]])
+    }
+    /// Replicated-frame data bits that differ.
+    pub fn rep_diff(&self, other: &Rbf) -> Vec<RepBit> {
+        let mut v = Vec::new();
+        for f in 0..REP_FRAMES {
+            let (a, b) = (self.rep_frame(f), other.rep_frame(f));
+            for i in 0..FRAME_DATA_BYTES {
+                let x = a[i] ^ b[i];
+                for k in 0..8 {
+                    if x >> k & 1 == 1 {
+                        v.push(RepBit { frame: f as u8, bit: (i * 8 + k) as u16 });
+                    }
+                }
+            }
+        }
+        v
+    }
+
     /// Does frame `frame`'s stored check word match its data?
     pub fn frame_crc_ok(&self, frame: usize) -> bool {
         let o = Self::frame_off(frame) + FRAME_DATA_BYTES;
         frame_crc(self.frame_data(frame)) == u16::from_le_bytes([self.0[o], self.0[o + 1]])
     }
 
-    /// Recompute every computable check word: frames 24..2724 and the
-    /// header. Frames 0-23 are left as they are.
+    /// Recompute every check word: the 6 replicated frames, frames
+    /// 24..2724 and the header.
     pub fn fix_crcs(&mut self) {
+        for f in 0..REP_FRAMES {
+            let d = self.rep_frame(f);
+            let c = frame_crc(&d[..FRAME_DATA_BYTES]).to_le_bytes();
+            self.set_rep_byte(f, FRAME_DATA_BYTES, c[0]);
+            self.set_rep_byte(f, FRAME_DATA_BYTES + 1, c[1]);
+        }
         for f in FIRST_CRC_FRAME..FRAMES {
             let c = frame_crc(self.frame_data(f));
             let o = Self::frame_off(f) + FRAME_DATA_BYTES;
@@ -118,7 +190,8 @@ impl Rbf {
         self.0[HDR_CRC_AT..HDR_CRC_AT + 2].copy_from_slice(&c.to_le_bytes());
     }
 
-    /// Data bits that differ, frames in order.
+    /// Data bits that differ, raw frames in order (a replicated-frame bit
+    /// shows up 4 times here; see `rep_diff`).
     pub fn diff(&self, other: &Rbf) -> Vec<FrameBit> {
         let mut v = Vec::new();
         for f in 0..FRAMES {
@@ -143,5 +216,19 @@ mod tests {
     fn all_zero_frame_check_word() {
         // README: an all-zero frame's stored word is `ef 32`.
         assert_eq!(frame_crc(&[0u8; FRAME_DATA_BYTES]).to_le_bytes(), [0xef, 0x32]);
+    }
+
+    #[test]
+    fn replicated_frames_round_trip() {
+        let mut r = Rbf(vec![0; TOTAL_BYTES]);
+        let b = RepBit { frame: 3, bit: 1234 };
+        r.rep_set(b, true);
+        r.fix_crcs();
+        assert!(r.rep_get(b));
+        assert!((0..REP_FRAMES).all(|f| r.rep_frame_ok(f)));
+        assert_eq!(r.rep_diff(&Rbf(vec![0; TOTAL_BYTES])), vec![b]);
+        // Byte 154 of frame 3 sits at 4 consecutive raw bytes.
+        let o = HEADER_BYTES + (3 * FRAME_BYTES + 154) * REP_COPIES;
+        assert_eq!(&r.0[o..o + 4], &[4, 4, 4, 4]);
     }
 }

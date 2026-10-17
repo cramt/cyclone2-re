@@ -140,24 +140,28 @@ Observed on every uncompressed EP2C35 RBF so far (30 designs):
 | 0x04c-0x074 | 41 bytes, bits 0-2 only. Bit 2 of bytes 0x4d-0x6c is the 32-bit JTAG USERCODE, LSB first. By default that is the SOF checksum from the assembler report, so it changes with every design. The oracle pins it with `USE_CHECKSUM_AS_USERCODE OFF` |
 | 0x075-0x076 | CRC-16/MODBUS (poly 0xA001 reflected, init 0xffff) of bytes 0x4d-0x74, little endian |
 | 0x077-0x185 | 271 × `01` |
-| 0x186-0xd0fe7 | 2725 frames × 314 bytes: 312 data bytes + 2 check bytes |
+| 0x186-0xd0fe7 | 2725 raw frames × 314 bytes: 312 data bytes + 2 check bytes. Raw frames 0-23 are really 6 frames with each byte repeated 4 times |
 | 0xd0fe8-0xd100b | 36 × `ff` postamble |
 
 - Total: **856,076 bytes = 6,848,608 bits.** The 6,858,656-bit figure
   quoted from the handbook (not checked against the PDF) is 1,256 bytes,
   exactly 4 frames, more than this. Frame data is
   2725 × 2496 = 6,801,600 bits.
-- **Each frame has its own check word.** For frames 24-2724 it is the
-  reflected CRC-16 (poly 0xA001, the ARC/MODBUS polynomial) of the 312 data
-  bytes with an effective init of 0xfe54, stored little endian. That holds for
-  all 2701 of those frames in two different designs. An all-zero frame's word
-  is `ef 32`. Frames 0-23 don't fit this model at any fixed length or init.
-  Their data looks different too (8-byte runs of a repeated byte, 96-byte
-  period). Switching unused pins from "output driving ground" to "input
-  tri-stated" changes 9,687 bits: all of frames 1-23, plus one or two frames
-  in most 35-frame columns (for example 108 and 122). So frames 0-23 are most
-  likely the left I/O column with their own check scheme. That is an
-  inference, not tested pin by pin.
+- **Each frame has its own check word**: the reflected CRC-16 (poly
+  0xA001, the ARC/MODBUS polynomial) of the 312 data bytes with an
+  effective init of 0xfe54, stored little endian. An all-zero frame's word
+  is `ef 32`.
+- **Raw frames 0-23 are 6 frames with every byte sent 4 times.** Read
+  0x186-0x1d75 as 1,884 groups of 4 equal bytes; collapsing each group
+  gives 6 frames of 312 data bytes plus a check word, and that check word
+  is the same CRC as everywhere else. Observed on all 55 uncompressed
+  RBFs we have (every group uniform, every check word right); `cram
+  verify` recomputes all of them. So the stream holds 6 + 2701 = 2707
+  frames. Flat CRAM addresses (2701 columns) never reach the 6
+  replicated frames, so they hold something outside the routing/asm bit
+  space. The earlier "8-byte runs, 96-byte period" was this replication.
+  Why the device wants these frames 4 times is open (a slower shift
+  clock for that region is a guess).
 - Empty design (one output pin tied to 0) against one LUT driving that pin:
   145 non-CRC bits differ, 396 counting CRC words. That is LUT plus routing
   plus input-pin config plus USERCODE.
