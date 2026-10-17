@@ -1,9 +1,4 @@
-mod container;
-mod pdb;
-mod routing;
-mod icname;
-mod asm;
-mod export;
+use ddb::{asm, container, export, pdb, routing};
 
 use anyhow::{bail, Result};
 use std::path::PathBuf;

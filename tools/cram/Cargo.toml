@@ -1,0 +1,9 @@
+[package]
+name = "cram"
+version = "0.1.0"
+edition = "2021"
+description = "Cyclone II EP2C35 bitstream addressing: flat CRAM address <-> RBF frame/bit, RBF read/write"
+
+[dependencies]
+ddb = { path = "../ddb" }
+anyhow = "1"
