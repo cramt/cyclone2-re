@@ -1,0 +1,7 @@
+[package]
+name = "rbfdiff"
+version = "0.1.0"
+edition = "2021"
+description = "Bit-level diff of two Cyclone II raw bitstreams"
+
+[dependencies]

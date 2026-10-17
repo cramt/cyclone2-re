@@ -27,8 +27,11 @@
             nextpnr
             openfpgaloader
 
-            # the oracle is a 2013 binary, so it runs with --unshare-net
-            bubblewrap
+            # the oracle is a 2013 binary, so tools/quartus.sh runs it in an
+            # empty network namespace
+            util-linux
+            # throwaway exploration scripts in tools/
+            python3
           ];
         };
       }
