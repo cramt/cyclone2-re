@@ -55,12 +55,15 @@ roundtrip +dirs:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
     tools/cram/target/release/cram roundtrip - {{dirs}}
 
-# nextpnr chip database from your Quartus device files (build/chipdb/, never committed; ~10 min, 2.6 GB RAM)
-chipdb:
+# Regenerate the committed device database (db/) from your Quartus device files (~6 min)
+db:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
+    tools/cram/target/release/cram db db
+
+# nextpnr chip database from the committed db/ (build/chipdb/; ~10 min, 2.6 GB RAM, Python only)
+chipdb:
     mkdir -p build/chipdb
-    tools/cram/target/release/cram chipdb build/chipdb/chipdb.txt
-    python3 $NEXTPNR_CYCLONE2_SHARE/gen_chipdb.py $NEXTPNR_CYCLONE2_SHARE $NEXTPNR_CYCLONE2_SHARE/constids.inc build/chipdb/chipdb.txt build/chipdb/chipdb.bba
+    python3 $NEXTPNR_CYCLONE2_SHARE/gen_chipdb.py $NEXTPNR_CYCLONE2_SHARE $NEXTPNR_CYCLONE2_SHARE/constids.inc db/EP2C35F672C6/chipdb.txt.xz build/chipdb/chipdb.bba
     bbasm --le build/chipdb/chipdb.bba build/chipdb/chipdb-EP2C35F672C6.bin
     rm build/chipdb/chipdb.bba
 

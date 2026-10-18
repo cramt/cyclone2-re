@@ -542,9 +542,37 @@ program and no Quartus output involved:
 
 ```
 nix develop
-just chipdb                       # once (~10 min): nextpnr chip database from your Quartus device files
+just chipdb                       # once (~10 min): nextpnr chip database from the committed db/
 just open-build examples/blinky   # examples/blinky/build/top.rbf
 ```
+
+No Quartus files are read at any step: everything comes from the device
+database committed under `db/` (below).
+
+**Device database** (`db/EP2C35F672C6/`, `tools/cram/src/db.rs`). What the
+use-time commands (`cram pack`, `blank`, `chipdb`, `quartus-export`) need,
+derived once from Quartus' devinfo by `just db` (`cram db db`, about 6
+minutes) and committed, the way prjxray-db or Apicula ship theirs. Two
+xz files:
+
+| file | size | contents |
+|---|---|---|
+| `device.bin.xz` | 3.2 MB (41.7 MB raw) | magic `C2RE-DB`, format version, then a [postcard](https://postcard.jamesmunns.com/wire-format) encoding of `db::Stored`: the routing graph (376,788 elements, 210,403 templates) and its 7,996,500 routing bits, stored by column as deltas; the asmdb block tables; the 475 bonded user pins of the F672 package with their IOE, bank and dual-purpose role |
+| `chipdb.txt.xz` | 9.2 MB (124.5 MB raw) | `cram chipdb` output, the input of `nextpnr/cyclone2/gen_chipdb.py` |
+
+`cram db` writes `device.bin.xz`, reads it back (it must re-encode to the
+same bytes), and exports `chipdb.txt.xz` from what it read back, so the
+nextpnr generator input can't drift from the packer's database. Output is
+deterministic (fixed-size xz blocks), so an unchanged device and unchanged
+code reproduce the committed files byte for byte. Rerun `just db` after
+changing anything `db.rs` stores or `chipdb.rs` exports, and bump
+`db::VERSION` when a stored type changes; a cram that reads another
+version refuses the file. cram finds the database through `CRAM_DB` (the
+`db/` directory) if set, otherwise in the checkout it was built in (walking
+up from the executable, then the source path cargo built it from). The
+reverse-engineering commands (`check`, `assemble`, `roundtrip`, `routing`,
+`lab-check`, `dump`, `io-bits`) still read Quartus' files directly
+(`CRAM_DEVINFO`).
 
 A design dir holds `*.v` (top module `top`) and optionally `pins.qsf`
 (`set_location_assignment PIN_x -to port` lines; default
@@ -579,9 +607,10 @@ except r1, as before (`just roundtrip`). The header's 41-byte USERCODE block
 has a fixed bits-0/1 pattern whose meaning is unknown; it is the same in
 all 190 pinned-USERCODE RBFs.
 
-**Chip database** (`tools/cram/src/chipdb.rs` → `nextpnr/cyclone2/gen_chipdb.py`
-→ bbasm). Generated at use time from `devinfo/cycloneii`; `build/chipdb/`
-is not in git. Each Quartus tile (x, y) is two nextpnr tiles: (2x, y) holds
+**Chip database** (`tools/cram/src/chipdb.rs` → `db/EP2C35F672C6/chipdb.txt.xz`
+→ `nextpnr/cyclone2/gen_chipdb.py` → bbasm). `just chipdb` needs Python
+and the committed text only; the 242 MB binary in `build/chipdb/` is not
+in git. Each Quartus tile (x, y) is two nextpnr tiles: (2x, y) holds
 the routing graph (one wire `G<node>` per element, an alias for every
 foreign element that drives one, one pip per graph edge in its
 destination's tile: 2,440 tile types, 2.29 M wires, 3,104,196 pips), and
@@ -595,7 +624,7 @@ LE 0 of the LAB below. I/O tiles get IOE bels (data from the IOE's
 `IO_DATA_INPUT` lines, pad-to-core onto both `IO_DATA_IN` paths or the
 clock pin's `CLK_BUFFER`), and 16 clock-control bels sit at their
 `CLKBUF_OUT`. Measured: `just chipdb` takes 9.5 minutes and 2.6 GB peak
-(`cram chipdb` 27 s, the rest himbaechel's python generator and bbasm);
+(himbaechel's python generator and bbasm);
 the binary is 242 MB, and nextpnr-himbaechel needs about 330 MB for a
 small design.
 
@@ -656,7 +685,9 @@ Quartus' fitter accepts each placement and routing (all routes preserved,
 no legality errors) and TimeQuest reports positive setup and hold slack.
 Built inside `nix develop` (the packaged nextpnr, a chip
 database from `just chipdb`), all four RBFs are identical to the validated
-ones.
+ones, also with `~/altera` hidden and `CRAM_DEVINFO` unset (chip database
+and RBFs rebuilt from `db/` alone, byte-identical to those built from
+Quartus' files).
 
 **On hardware (2026-10-18):** open-built blinky, and a variant with the LED
 order flipped that Quartus never saw, run on a DE2 loaded with `just flash`
@@ -669,8 +700,8 @@ I/O registers or other standards); clocks must come straight from a pin
 (no logic-driven or inverted clocks); no inverted async clear; registers
 power up 0 (an init of 1 costs inverters).
 
-Nothing from Quartus gets redistributed. The repo ships only the derived bit
-database and our own tools.
+Nothing from Quartus gets redistributed. The repo ships only the derived
+device database (`db/`, our own format) and our own tools.
 
 ## Phases
 
@@ -682,7 +713,7 @@ database and our own tools.
 | 3 | Logic: LUT truth tables, FF modes, carry chains | asmdb decoded. LUT, LE inputs A-D, carry, registers, packing, LAB clocks/CE/aclr/sclr/sload placed by the asmdb, setting values fit on 9 fuzz designs. All 8 held-out counters and all 9 LE fuzz designs byte-identical with the I/O model |
 | 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clocks (pin → clkctrl → GCLK → RCLK → LAB) modelled: graph plus asmdb clkctrl select, checked on 2 clock pins and 4 global nets |
 | 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical. Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K, multipliers, PLLs not started |
-| 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins: `just open-build`, no Quartus involved (chip database generated from the user's device files, base image from the device DB). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx and picorv32. No timing model, no M4K/multiplier/PLL, no bidirectional or registered I/O |
+| 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins: `just open-build`, no Quartus involved (packing, base image and chip database from the committed `db/`, no Quartus files at use time). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx and picorv32. No timing model, no M4K/multiplier/PLL, no bidirectional or registered I/O |
 | 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | done: `cram svf` writes the JTAG stream (RBF minus its passive-serial preamble) with a CONF_DONE check; openFPGALoader plays it. Open-built designs run on a DE2. Not done: EPCS (non-volatile) programming |
 
 ## Prior art

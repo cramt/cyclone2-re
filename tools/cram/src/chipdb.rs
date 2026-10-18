@@ -1,7 +1,7 @@
 //! nextpnr himbaechel chip database, as a flat text description that
 //! `nextpnr/cyclone2/gen_chipdb.py` turns into a .bba with himbaechel's own
-//! generator. Generated from the user's Quartus device files at use time;
-//! never committed.
+//! generator. `cram db` commits it as `db/EP2C35F672C6/chipdb.txt.xz`, so
+//! building the chip database takes Python only.
 //!
 //! Layout. Quartus tile (x, y) becomes two nextpnr tiles:
 //!

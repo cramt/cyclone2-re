@@ -3,8 +3,12 @@
 generator (himbaechel_dbgen). The text is already flat (one line per wire,
 pip, bel, tile instance and inter-tile node), so this is a transcription.
 
-    gen_chipdb.py <dbgen dir> <constids.inc> <chipdb.txt> <out.bba>
+    gen_chipdb.py <dbgen dir> <constids.inc> <chipdb.txt[.xz]> <out.bba>
+
+The cyclone2-re repo commits it xz-compressed as
+db/EP2C35F672C6/chipdb.txt.xz, so building needs Python and that file only.
 """
+import lzma
 import sys
 
 sys.path.insert(0, sys.argv[1])
@@ -12,7 +16,7 @@ from himbaechel_dbgen.chip import Chip, NodeWire, PinType  # noqa: E402
 
 constids, src, out = sys.argv[2:5]
 ch = tt = bel = pkg = None
-with open(src) as f:
+with (lzma.open(src, "rt") if src.endswith(".xz") else open(src)) as f:
     for line in f:
         a = line.split()
         k = a[0]

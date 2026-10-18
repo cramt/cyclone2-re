@@ -4,3 +4,4 @@ build/
 /specimens/
 __pycache__/
 __pycache__/
+*.xz.tmp

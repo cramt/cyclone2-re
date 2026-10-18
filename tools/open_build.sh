@@ -10,6 +10,7 @@
 #
 # Needs the chip database from `just chipdb` (build/chipdb/) and the
 # devshell's yosys and nextpnr-himbaechel (NEXTPNR overrides the binary).
+# cram reads the repo's device database (db/); no Quartus files.
 set -euo pipefail
 
 root=$(dirname "$(dirname "$(realpath "$0")")")

@@ -6,9 +6,9 @@
 # is ever upstreamed into nextpnr (https://github.com/YosysHQ/nextpnr).
 #
 # Only himbaechel/cyclone2 is built: the chip database is generated from the
-# user's Quartus install at use time (`just chipdb`), so the derivation also
-# installs what that needs: bbasm, himbaechel's python generator and our
-# gen_chipdb.py.
+# repo's committed db/EP2C35F672C6/chipdb.txt.xz (`just chipdb`), so the
+# derivation also installs what that needs: bbasm, himbaechel's python
+# generator and our gen_chipdb.py.
 {
   stdenv,
   nextpnr,

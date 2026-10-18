@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 fn main() -> anyhow::Result<()> {
     let devinfo = std::path::PathBuf::from(std::env::var("HOME")?).join("altera/13.0sp1/quartus/common/devinfo/cycloneii");
     let db = ddb::asmdb::parse(&ddb::container::Ddb::open(&devinfo.join("ddb_magellan4_asmdb.ddb"))?.body)?;
-    let io = cram::io::IoDb::new(&devinfo, &db)?;
+    let io = cram::io::IoDb::new(&cram::io::pins_from_quartus(&devinfo)?, &db)?;
     let empty = Rbf::read(std::path::Path::new(&std::env::args().nth(1).unwrap()))?;
     // flat -> (block type, arch, group, path, level, bit index)
     let mut owner: HashMap<u32, Vec<(i32, i32, i32, usize, usize, usize)>> = HashMap::new();

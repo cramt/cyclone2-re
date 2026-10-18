@@ -61,10 +61,10 @@ pub mod arch {
 }
 
 /// Index into `Asmdb::muxes`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MuxId(pub u32);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MuxKind {
     Plain,
     Labeled { name: Option<String> },
@@ -78,7 +78,7 @@ pub enum MuxKind {
     Encoded,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Mux {
     /// Bit positions relative to the block base flat address (block base
     /// + bit = flat CRAM address), or for map/label muxes plain integers.
@@ -86,14 +86,14 @@ pub struct Mux {
     pub kind: MuxKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MuxData {
     pub arch_value: bool,
     pub aux: Option<MuxId>,
     pub next_selection: Option<MuxId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ArchBody {
     /// `ARCH_GROUP_STD` (`block_info` none) and `ARCH_GROUP_CALC`.
     Muxed {
@@ -107,7 +107,7 @@ pub enum ArchBody {
     Stlmap { paths: Vec<Vec<Option<MuxId>>>, data: Vec<(bool, Option<u32>, Option<MuxId>, Option<u32>)> },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ArchGroup {
     pub group_index: i32,
     pub arch_type: i32,
@@ -132,7 +132,7 @@ impl ArchGroup {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockInfo {
     pub block_type: i32,
     pub num_ram_cols: i32,
@@ -143,7 +143,7 @@ pub struct BlockInfo {
     pub simple_block_lists: BTreeMap<i32, u32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Asmdb {
     pub num_bits: i32,
     pub block_info_map: Vec<(i32, u32)>,

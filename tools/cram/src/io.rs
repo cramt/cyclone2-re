@@ -109,7 +109,7 @@ fn bit_of(v: i32) -> Result<Option<IoBit>> {
 }
 
 /// Which asmdb instance a package pin's IOE is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Ioe {
     pub block: i32,
     /// Path index in that block type's groups.
@@ -141,7 +141,7 @@ pub struct IoDb {
     muxes: HashMap<(i32, i32), SourceMux>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Pin {
     pub name: String,
     pub ioe: Ioe,
@@ -151,7 +151,7 @@ pub struct Pin {
 }
 
 /// Configuration pins that double as user I/O.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DualPurpose {
     /// ASDO, nCSO: active serial flash interface, inputs with pull-up.
     SerialFlash,
@@ -163,48 +163,56 @@ fn mux_bits(db: &Asmdb, m: &Option<MuxId>) -> Vec<i32> {
     m.map(|m| db.mux(m).bits.clone()).unwrap_or_default()
 }
 
-impl IoDb {
-    pub fn new(devinfo: &Path, db: &Asmdb) -> Result<Self> {
-        let (pkg, pad) = ddb::pins::load(devinfo, "magellan4", "fbga672")?;
-        // Path order is pad-id order within each pad type; dedicated clock
-        // inputs pair up in pad order, the p pad in block 60 and n in 61.
-        // Observed: every output-data mux of the I/O fuzz designs is on the
-        // path this predicts.
-        let mut pads: Vec<_> = pad.pads.iter().filter(|p| p.loc.is_some()).collect();
-        pads.sort_by_key(|p| p.id);
-        let mut ioe_of = HashMap::new();
-        let (mut row, mut col, mut clk) = (0, 0, 0);
-        for p in &pads {
-            let ioe = match p.io_type.as_deref() {
-                Some("Row I/O") => (BLOCK_ROW, &mut row),
-                Some("Column I/O") => (BLOCK_COL, &mut col),
-                Some("Dedicated Clock") => {
-                    let n = p.alt_name.as_deref().is_some_and(|a| a.ends_with('A'));
-                    let path = clk / 2;
-                    clk += 1;
-                    ioe_of.insert(p.id, Ioe { block: if n { BLOCK_CLK_N } else { BLOCK_CLK_P }, path });
-                    continue;
-                }
-                _ => continue,
-            };
-            ioe_of.insert(p.id, Ioe { block: ioe.0, path: *ioe.1 });
-            *ioe.1 += 1;
-        }
-        let mut pins = HashMap::new();
-        for m in ddb::pins::join(&pkg, &pad)? {
-            let [p] = m.pads.as_slice() else { continue };
-            let Some(&ioe) = ioe_of.get(&p.id) else { continue };
-            let f = p.function.as_deref().unwrap_or("");
-            let dual_purpose = if f.contains("nCEO") {
-                Some(DualPurpose::Nceo)
-            } else if f.contains("ASDO") || f.contains("nCSO") {
-                Some(DualPurpose::SerialFlash)
-            } else {
-                None
-            };
-            pins.insert(m.pin.name.clone(), Pin { name: m.pin.name.clone(), ioe, xyz: p.loc.unwrap(), bank: p.bank, dual_purpose });
-        }
+/// Every bonded user pin of the F672 package and its IOE, from Quartus'
+/// pkg and pad databases. Sorted by name, so the database `cram db` writes
+/// doesn't depend on hash order.
+pub fn pins_from_quartus(devinfo: &Path) -> Result<Vec<Pin>> {
+    let (pkg, pad) = ddb::pins::load(devinfo, "magellan4", "fbga672")?;
+    // Path order is pad-id order within each pad type; dedicated clock
+    // inputs pair up in pad order, the p pad in block 60 and n in 61.
+    // Observed: every output-data mux of the I/O fuzz designs is on the
+    // path this predicts.
+    let mut pads: Vec<_> = pad.pads.iter().filter(|p| p.loc.is_some()).collect();
+    pads.sort_by_key(|p| p.id);
+    let mut ioe_of = HashMap::new();
+    let (mut row, mut col, mut clk) = (0, 0, 0);
+    for p in &pads {
+        let ioe = match p.io_type.as_deref() {
+            Some("Row I/O") => (BLOCK_ROW, &mut row),
+            Some("Column I/O") => (BLOCK_COL, &mut col),
+            Some("Dedicated Clock") => {
+                let n = p.alt_name.as_deref().is_some_and(|a| a.ends_with('A'));
+                let path = clk / 2;
+                clk += 1;
+                ioe_of.insert(p.id, Ioe { block: if n { BLOCK_CLK_N } else { BLOCK_CLK_P }, path });
+                continue;
+            }
+            _ => continue,
+        };
+        ioe_of.insert(p.id, Ioe { block: ioe.0, path: *ioe.1 });
+        *ioe.1 += 1;
+    }
+    let mut pins = Vec::new();
+    for m in ddb::pins::join(&pkg, &pad)? {
+        let [p] = m.pads.as_slice() else { continue };
+        let Some(&ioe) = ioe_of.get(&p.id) else { continue };
+        let f = p.function.as_deref().unwrap_or("");
+        let dual_purpose = if f.contains("nCEO") {
+            Some(DualPurpose::Nceo)
+        } else if f.contains("ASDO") || f.contains("nCSO") {
+            Some(DualPurpose::SerialFlash)
+        } else {
+            None
+        };
+        pins.push(Pin { name: m.pin.name.clone(), ioe, xyz: p.loc.unwrap(), bank: p.bank, dual_purpose });
+    }
+    pins.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(pins)
+}
 
+impl IoDb {
+    pub fn new(pins: &[Pin], db: &Asmdb) -> Result<Self> {
+        let pins = pins.iter().map(|p| (p.name.clone(), p.clone())).collect();
         let mut features = BTreeMap::new();
         let mut muxes = HashMap::new();
         for g in db.arch_groups.iter().filter(|g| [BLOCK_ROW, BLOCK_COL, BLOCK_CLK_P, BLOCK_CLK_N].contains(&g.block_type)) {

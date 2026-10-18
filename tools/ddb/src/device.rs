@@ -23,8 +23,12 @@ impl Device {
             let p = devinfo.join(format!("ddb_{die}_{kind}.ddb"));
             Ddb::open(&p).with_context(|| format!("opening {}", p.display()))
         };
-        let routing = routing::parse(&open("routing")?.body)?;
-        let asm = asm::parse(&open("asm")?.body)?;
+        Self::new(routing::parse(&open("routing")?.body)?, asm::parse(&open("asm")?.body)?)
+    }
+
+    /// The graph and its bits from wherever they were stored (Quartus'
+    /// files, or the `cram` crate's own database).
+    pub fn new(routing: routing::Routing, asm: Vec<asm::AsmNode>) -> Result<Self> {
         ensure!(asm.len() == routing.elements.len(), "ASM node count != routing element count");
         let mut by_loc: HashMap<_, Vec<Node>> = HashMap::new();
         for (i, e) in routing.elements.iter().enumerate() {

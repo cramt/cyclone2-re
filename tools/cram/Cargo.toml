@@ -8,3 +8,9 @@ description = "Cyclone II EP2C35 bitstream addressing: flat CRAM address <-> RBF
 ddb = { path = "../ddb" }
 anyhow = "1"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+# The shipped device database (db/): a stable, documented wire format
+# (https://postcard.jamesmunns.com/wire-format) over serde, xz-compressed
+# with a pure-Rust encoder (lzma-rs only writes literals, ~2x the size).
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+lzma-rust2 = { version = "0.21", default-features = false, features = ["std", "encoder", "optimization", "xz"] }

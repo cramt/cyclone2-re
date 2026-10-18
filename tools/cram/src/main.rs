@@ -7,7 +7,10 @@ use ddb::device::Device;
 
 fn usage() -> ! {
     eprintln!(
-        "usage (CRAM_DEVINFO overrides the Quartus devinfo/cycloneii dir):
+        "usage. pack, quartus-export, blank and chipdb read the device database in
+db/ (CRAM_DB overrides it; default: the db/ of the checkout cram was built
+in). `db` and the reverse-engineering commands read Quartus' devinfo/cycloneii
+(CRAM_DEVINFO overrides ~/altera/13.0sp1/quartus/common/devinfo/cycloneii).
   cram check <empty.rbf> <design dir>...   modelled bits vs the design's RBF, residuals
                                            (needs build/top.rcf and the post-fit
                                            netlist from `just netlist`)
@@ -29,7 +32,9 @@ fn usage() -> ! {
   cram svf <in.rbf> <out.svf>              JTAG configuration of the RBF, CONF_DONE checked
                                            (an RBF itself is not a JTAG stream)
   cram chipdb <out.txt>                    nextpnr chip database description (for
-                                           nextpnr/cyclone2/gen_chipdb.py)"
+                                           nextpnr/cyclone2/gen_chipdb.py)
+  cram db <dir>                            <dir>/EP2C35F672C6/: the device database and
+                                           chip database text, from Quartus' files"
     );
     std::process::exit(2)
 }
@@ -61,14 +66,14 @@ fn categorise(b: FrameBit, used: &HashSet<(u32, u32)>) -> &'static str {
     }
 }
 
+/// RE commands read Quartus' device files directly.
 fn load_db() -> Result<Db> {
-    let db = asmdb()?;
-    Ok(Db {
-        dev: Device::load(&devinfo(), "magellan4")?,
-        lab: cram::lab::LabDb::new(&db)?,
-        io: cram::io::IoDb::new(&devinfo(), &db)?,
-        asmdb: db,
-    })
+    Db::from_quartus(&devinfo())
+}
+
+/// Use-time commands read only the database this repo ships.
+fn shipped_db() -> Result<Db> {
+    Db::load(&cram::db::locate()?)
 }
 
 fn check(empty: &Path, dirs: &[String]) -> Result<()> {
@@ -319,7 +324,7 @@ fn main() -> Result<()> {
         }
         ("lab-check", []) => lab_check()?,
         ("pack", [empty, routed, out]) => {
-            let m = load_db()?;
+            let m = shipped_db()?;
             let r = cram::nextpnr::read(&m.dev, Path::new(routed))?;
             let des = r.to_phys(&m.dev, &m.io)?;
             let (rbf, bits) = pack(&m, Path::new(empty), &des)?;
@@ -327,7 +332,7 @@ fn main() -> Result<()> {
             report(Path::new(out), &des, &bits);
         }
         ("quartus-export", [routed, dir]) => {
-            let m = load_db()?;
+            let m = shipped_db()?;
             let r = cram::nextpnr::read(&m.dev, Path::new(routed))?;
             let q = r.to_quartus(&m.dev, &m.io)?;
             let dir = Path::new(dir);
@@ -387,11 +392,12 @@ fn main() -> Result<()> {
         }
         ("svf", [rbf, out]) => std::fs::write(out, cram::jtag::svf(&Rbf::read(Path::new(rbf))?))?,
         ("blank", [out]) => {
-            let m = load_db()?;
+            let m = shipped_db()?;
             std::fs::write(out, cram::blank::image(&m.asmdb, &m.io)?.bytes())?;
         }
+        ("db", [out]) => cram::db::build(&devinfo(), Path::new(out))?,
         ("chipdb", [out]) => {
-            let m = load_db()?;
+            let m = shipped_db()?;
             let mut w = std::io::BufWriter::new(std::fs::File::create(out)?);
             cram::chipdb::export(&m, &mut w)?;
         }
