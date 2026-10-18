@@ -402,7 +402,11 @@ config leave-one-out from designs with the same pin set:
 | c24p, c26k, c28kp, c26e, c22e, cnt26 | byte-identical |
 | c20, c32p | 2 data bits: an LED output on a local line the learned I/O mux table hasn't seen |
 
-The 9 fuzz designs reassembled leave-one-out: see the phase table.
+The 9 fuzz designs, reassembled with the I/O config copied leave-one-out
+from the other 8, have no differing bit outside I/O. Each differs in
+17-20 I/O bits: switches the fitter promoted to global clock or clear
+nets change that pin's config, so the pin set isn't really fixed. That
+is I/O-side work.
 c26e found the one rule the fuzz designs had missed: an inverted sclr
 clears `LAB_INVERT` 5. The model now tracks port inversion.
 
