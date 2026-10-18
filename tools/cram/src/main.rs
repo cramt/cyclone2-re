@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use cram::{addr, design::Design, le, rbf::{self, FrameBit, Rbf, RepBit}};
+use cram::{addr, le, phys::{Bits, Db, PhysDesign}, quartus, rbf::{self, FrameBit, Rbf, RepBit}};
 use ddb::device::Device;
 
 fn usage() -> ! {
@@ -51,30 +51,23 @@ fn categorise(b: FrameBit, used: &HashSet<(u32, u32)>) -> &'static str {
     }
 }
 
-struct Model {
-    dev: Device,
-    lab: cram::lab::LabDb,
-    io: cram::io::IoDb,
-}
-
-impl Model {
-    fn load() -> Result<Self> {
-        let db = asmdb()?;
-        Ok(Model {
-            dev: Device::load(&devinfo(), "magellan4")?,
-            lab: cram::lab::LabDb::new(&db)?,
-            io: cram::io::IoDb::new(&devinfo(), &db)?,
-        })
-    }
+fn load_db() -> Result<Db> {
+    let db = asmdb()?;
+    Ok(Db {
+        dev: Device::load(&devinfo(), "magellan4")?,
+        lab: cram::lab::LabDb::new(&db)?,
+        io: cram::io::IoDb::new(&devinfo(), &db)?,
+    })
 }
 
 fn check(empty: &Path, dirs: &[String]) -> Result<()> {
-    let m = Model::load()?;
+    let m = load_db()?;
     let base = Rbf::read(empty)?;
     let mut tot = BTreeMap::<String, usize>::new();
     for d in dirs {
         let dir = Path::new(d);
-        let des = Design::load(&m.dev, &m.lab, &m.io, dir)?;
+        let q = quartus::load(&m.dev, dir)?;
+        let des = q.design.bits(&m)?;
         let rbf = Rbf::read(&dir.join("build/output_files/top.rbf"))?;
         // Raw frames 0-23 are the replicated frames, compared separately.
         let obs: HashSet<FrameBit> =
@@ -84,7 +77,7 @@ fn check(empty: &Path, dirs: &[String]) -> Result<()> {
         let mut add = |k: String, v: usize| *c.entry(k).or_default() += v;
         add("observed flips".into(), obs.len());
         add("conflicting predictions".into(), des.conflicts().len());
-        add("pins".into(), des.pins.len());
+        add("pins".into(), q.design.pins.len());
         add("replicated-frame flips".into(), rep_obs.len());
         let mut rep_predicted = HashSet::new();
         for &(b, v) in &des.rep {
@@ -93,12 +86,12 @@ fn check(empty: &Path, dirs: &[String]) -> Result<()> {
             add(format!("Io (replicated frames) {}", if rbf.rep_get(b) == v { "right" } else { "WRONG" }), 1);
         }
         add("residual: replicated frames".into(), rep_obs.difference(&rep_predicted).count());
-        for u in &des.logic.unmodelled {
+        for u in &q.unmodelled {
             eprintln!("{d}: unmodelled: {u}");
         }
-        add("logic features unmodelled".into(), des.logic.unmodelled.len());
+        add("logic features unmodelled".into(), q.unmodelled.len());
         let mut predicted = HashSet::new();
-        for &(b, v, src) in &des.bits {
+        for &(b, v, src) in &des.core {
             predicted.insert(b);
             let name = format!("{src:?}");
             add(format!("{name} predicted"), 1);
@@ -111,7 +104,7 @@ fn check(empty: &Path, dirs: &[String]) -> Result<()> {
                 }
             }
         }
-        let used: HashSet<(u32, u32)> = des.logic.les.iter().map(|l| (l.x, l.y)).collect();
+        let used: HashSet<(u32, u32)> = q.design.logic.les.iter().map(|l| (l.x, l.y)).collect();
         for b in obs.iter().filter(|b| !predicted.contains(b)) {
             add(format!("residual: {}", categorise(*b, &used)), 1);
             if std::env::var_os("CRAM_VERBOSE").is_some() {
@@ -143,40 +136,51 @@ fn is_io_region(b: FrameBit) -> bool {
     })
 }
 
-fn build(m: &Model, empty: &Path, dir: &Path) -> Result<(Rbf, Design)> {
+/// Base image + the physical design's bits, check words recomputed.
+fn pack(m: &Db, empty: &Path, des: &PhysDesign) -> Result<(Rbf, Bits)> {
     let mut rbf = Rbf::read(empty)?;
-    let des = Design::load(&m.dev, &m.lab, &m.io, dir)?;
-    anyhow::ensure!(des.conflicts().is_empty(), "model sets {} bits both ways", des.conflicts().len());
-    for &(b, v, _) in &des.bits {
+    let bits = des.bits(m)?;
+    anyhow::ensure!(bits.conflicts().is_empty(), "model sets {} bits both ways", bits.conflicts().len());
+    for &(b, v, _) in &bits.core {
         rbf.set(b, v);
     }
-    for &(b, v) in &des.rep {
+    for &(b, v) in &bits.rep {
         rbf.rep_set(b, v);
     }
     rbf.fix_crcs();
-    Ok((rbf, des))
+    Ok((rbf, bits))
+}
+
+fn report(out: &Path, des: &PhysDesign, bits: &Bits) {
+    let mut by = BTreeMap::<String, usize>::new();
+    for &(_, _, s) in &bits.core {
+        *by.entry(format!("{s:?}")).or_default() += 1;
+    }
+    eprintln!(
+        "assembled {}: model bits {by:?} + {} replicated-frame I/O bits, {} LEs, {} pins, {} nets",
+        out.display(), bits.rep.len(), des.logic.les.len(), des.pins.len(), des.nets.len()
+    );
 }
 
 fn assemble(empty: &Path, dir: &Path, out: &Path) -> Result<()> {
-    let m = Model::load()?;
-    let (rbf, des) = build(&m, empty, dir)?;
-    std::fs::write(out, rbf.bytes())?;
-    let mut by = BTreeMap::<String, usize>::new();
-    for &(_, _, s) in &des.bits {
-        *by.entry(format!("{s:?}")).or_default() += 1;
+    let m = load_db()?;
+    let q = quartus::load(&m.dev, dir)?;
+    for u in &q.unmodelled {
+        eprintln!("unmodelled: {u}");
     }
-    eprintln!("assembled {}: model bits {by:?} + {} replicated-frame I/O bits, {} pins, {} unmodelled logic features",
-        out.display(), des.rep.len(), des.pins.len(), des.logic.unmodelled.len());
+    let (rbf, bits) = pack(&m, empty, &q.design)?;
+    std::fs::write(out, rbf.bytes())?;
+    report(out, &q.design, &bits);
     Ok(())
 }
 
 /// Assemble each design dir and compare with Quartus's RBF in it.
 fn roundtrip(empty: &Path, dirs: &[String]) -> Result<()> {
-    let m = Model::load()?;
+    let m = load_db()?;
     let mut same = 0;
     for d in dirs {
         let theirs = Rbf::read(&Path::new(d).join("build/output_files/top.rbf"))?;
-        match build(&m, empty, Path::new(d)) {
+        match quartus::load(&m.dev, Path::new(d)).and_then(|q| Ok((pack(&m, empty, &q.design)?.0, q.design))) {
             Ok((ours, des)) => {
                 if ours == theirs {
                     same += 1;
@@ -281,7 +285,7 @@ fn main() -> Result<()> {
             // resolve, for scripts that model the rest.
             let dev = Device::load(&devinfo(), "magellan4")?;
             let sigs = cram::rcf::read(&Path::new(dir).join("build/top.rcf"))?;
-            let (bits, skipped) = cram::route::bits(&dev, &sigs)?;
+            let (bits, skipped) = cram::route::bits(&dev, &sigs);
             for b in bits {
                 println!(
                     "{} enc={} high={} strange={} cff={}",

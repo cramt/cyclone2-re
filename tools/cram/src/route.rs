@@ -1,9 +1,9 @@
 //! Routed nets (from an `.rcf`) -> routing-graph edges -> flat CRAM bits.
 
-use anyhow::Result;
 use ddb::asm::AsmBit;
 use ddb::device::{Device, Node};
 
+use crate::phys::{Pip, RoutedNet};
 use crate::rcf::{Resource, Signal};
 
 /// rcf resource kind -> `DEV_ELEMENT_ENUM` of the routing element. Found by
@@ -94,16 +94,23 @@ pub fn resolve(dev: &Device, sig: &Signal) -> Resolved {
     out
 }
 
-/// Every CRAM bit the routed nets set.
-pub fn bits<'d>(dev: &'d Device, sigs: &[Signal]) -> Result<(Vec<&'d AsmBit>, Vec<Resource>)> {
-    let mut bits = Vec::new();
+/// The routed nets as graph edges, plus the rcf resources that aren't
+/// graph edges (block-level hops the logic and I/O models cover).
+pub fn nets(dev: &Device, sigs: &[Signal]) -> (Vec<RoutedNet>, Vec<Resource>) {
+    let mut nets = Vec::new();
     let mut skipped = Vec::new();
     for s in sigs {
         let r = resolve(dev, s);
-        for h in &r.hops {
-            bits.extend(dev.edge_bits(h.src, h.edge));
-        }
+        let pips = r.hops.iter().map(|h| Pip::new(dev, h.src, h.dst).expect("resolve only yields graph edges")).collect();
+        nets.push(RoutedNet { name: s.name.clone(), pips });
         skipped.extend(r.skipped);
     }
-    Ok((bits, skipped))
+    (nets, skipped)
+}
+
+/// Every CRAM bit the routed nets set.
+pub fn bits<'d>(dev: &'d Device, sigs: &[Signal]) -> (Vec<&'d AsmBit>, Vec<Resource>) {
+    let (nets, skipped) = nets(dev, sigs);
+    let bits = nets.iter().flat_map(|n| &n.pips).flat_map(|p| dev.edge_bits(p.src(), p.edge())).collect();
+    (bits, skipped)
 }

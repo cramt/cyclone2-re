@@ -135,9 +135,6 @@ pub struct Logic {
     pub les: Vec<LeConfig>,
     pub clkctrls: Vec<ClkCtrl>,
     pub labs: BTreeMap<(u32, u32), LabConfig>,
-    /// Things the design uses that this model doesn't cover yet; their bits
-    /// will be missing from the output.
-    pub unmodelled: Vec<String>,
 }
 
 fn port_index(p: &str) -> Option<usize> {
@@ -170,8 +167,12 @@ fn names(a: &Atom) -> Vec<String> {
 }
 
 impl Logic {
-    pub fn build(atoms: &[Atom], sigs: &[Signal]) -> Result<Self> {
+    /// From the Quartus post-fit netlist and rcf. Also returns what the
+    /// design uses that this model doesn't cover yet; those bits will be
+    /// missing from the output.
+    pub fn from_quartus(atoms: &[Atom], sigs: &[Signal]) -> Result<(Self, Vec<String>)> {
         let mut out = Logic::default();
+        let mut unmodelled = Vec::new();
         // LE slots: comb and ff atoms by (x, y, le).
         let mut slots: BTreeMap<(u32, u32, u32), (Option<&Atom>, Option<&Atom>)> = BTreeMap::new();
         let mut cell: HashMap<String, (u32, u32, u32)> = HashMap::new();
@@ -263,11 +264,11 @@ impl Logic {
         for (&(x, y, le), &(_, ff)) in &slots {
             let Some(ff) = ff else { continue };
             let Some(d) = domain(x, y, le, ff) else {
-                out.unmodelled.push(format!("{}: clock not from a global buffer", ff.name));
+                unmodelled.push(format!("{}: clock not from a global buffer", ff.name));
                 continue;
             };
             if ff.net("ena").is_some() && d.2.is_none() {
-                out.unmodelled.push(format!("{}: clock enable not on a LAB control line", ff.name));
+                unmodelled.push(format!("{}: clock enable not on a LAB control line", ff.name));
             }
             let v = lab_domains.entry((x, y)).or_default();
             if !v.contains(&d) {
@@ -324,7 +325,7 @@ impl Logic {
                 let k = ctl.get(&(x, y, le));
                 let clock = domain(x, y, le, ff).and_then(|d| domain_index.get(&((x, y), d))).copied().unwrap_or(0);
                 if inverted(ff, "aclr") {
-                    out.unmodelled.push(format!("{}: inverted aclr", ff.name));
+                    unmodelled.push(format!("{}: inverted aclr", ff.name));
                 }
                 let aclr = if ff.net("aclr").is_some() {
                     let a = match (k.and_then(|k| k.get("ACLR")), g.and_then(|g| g.get("ACLR"))) {
@@ -390,7 +391,7 @@ impl Logic {
             let input = *ins.get(k).with_context(|| format!("clock control at {k:?} has no CLKBUF_IN"))?;
             out.clkctrls.push(ClkCtrl { g, input });
         }
-        Ok(out)
+        Ok((out, unmodelled))
     }
 
     /// Every bit this logic fixes, as (flat CRAM address, value). Bits not
