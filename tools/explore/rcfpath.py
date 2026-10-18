@@ -35,6 +35,9 @@ def parse_rcf(path):
             cur = (line.split('=')[1].strip(' {\n'), [])
             sigs.append(cur)
             continue
+        lab = re.match(r'^\s*label = (\S+), (.*)$', line)
+        if lab:
+            line = lab.group(2) + '\n'
         m = RES.match(line)
         if m and cur:
             t, x, y, z, i = m.groups()

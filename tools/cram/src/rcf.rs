@@ -40,6 +40,9 @@ impl Dest {
 pub struct Signal {
     pub name: String,
     pub resources: Vec<Resource>,
+    /// For each resource, the one it hangs off in the rcf tree (the
+    /// previous resource, or a `branch_point` label).
+    pub parents: Vec<Option<usize>>,
     pub dests: Vec<Dest>,
 }
 
@@ -77,7 +80,7 @@ pub fn parse(text: &str) -> Result<Vec<Signal>> {
         let l = line.trim();
         if let Some(rest) = l.strip_prefix("signal_name = ") {
             let name = rest.trim_end_matches('{').trim().to_string();
-            cur = Some(Signal { name, resources: vec![], dests: vec![] });
+            cur = Some(Signal { name, resources: vec![], parents: vec![], dests: vec![] });
             at = None;
             labels.clear();
         } else if l == "}" {
@@ -95,12 +98,14 @@ pub fn parse(text: &str) -> Result<Vec<Signal>> {
                 // that later `branch_point`s can name.
                 let (label, res) = rest.split_once(", ").with_context(bad)?;
                 s.resources.push(parse_resource(res).with_context(bad)?);
+                s.parents.push(at);
                 at = Some(s.resources.len() - 1);
                 labels.push((label.to_string(), s.resources.len() - 1));
             } else if let Some(label) = body.strip_prefix("branch_point = ") {
                 at = Some(labels.iter().rev().find(|(l, _)| l == label).with_context(bad)?.1);
             } else if let Some(r) = parse_resource(body) {
                 s.resources.push(r);
+                s.parents.push(at);
                 at = Some(s.resources.len() - 1);
             } else if !body.is_empty() {
                 bail!(bad());

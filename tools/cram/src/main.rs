@@ -8,11 +8,12 @@ use ddb::device::Device;
 fn usage() -> ! {
     eprintln!(
         "usage (CRAM_DEVINFO overrides the Quartus devinfo/cycloneii dir):
-  cram check <empty.rbf> <design dir>...   predicted routing bits vs RBF diff
+  cram check <empty.rbf> <design dir>...   modelled bits vs the design's RBF, residuals
+                                           (needs build/top.rcf and the post-fit
+                                           netlist from `just netlist`)
   cram addr <flat>...                      flat CRAM address -> frame:bit
   cram routing <design dir>                routing bits an rcf sets, as fN:B
-  cram lab-check                           asmdb LAB tables vs the fuzz-fit LUT
-                                           geometry and learned LE input mux
+  cram lab-check                           asmdb LAB tables vs the fuzz-fit LUT geometry
   cram assemble <empty.rbf> <design dir> <out.rbf> [--io <training dir>...]
       empty RBF + modelled bits, check words recomputed. --io adds the
       I/O bits every training design shares (same pin set), learned as is.
@@ -29,7 +30,7 @@ fn devinfo() -> PathBuf {
 }
 
 /// Residual bit -> coarse category, by CRAM geometry alone.
-fn categorise(b: FrameBit, used: &HashSet<(u32, u32)>, used_le_rows: &HashSet<u32>, hist: &mut BTreeMap<i64, usize>) -> &'static str {
+fn categorise(b: FrameBit, used: &HashSet<(u32, u32)>) -> &'static str {
     if (b.frame as usize) < rbf::FIRST_CRC_FRAME {
         return "frames 0-23";
     }
@@ -40,70 +41,64 @@ fn categorise(b: FrameBit, used: &HashSet<(u32, u32)>, used_le_rows: &HashSet<u3
         return "top/bottom I/O rows";
     }
     let y = 35 - (row - le::lab_row(35)) / le::LAB_ROWS;
-    let off = row - le::lab_row(y);
-    // Nearest LAB column by LUT anchor.
-    let Some((x, d)) = (1..=64)
-        .filter_map(|x| le::lut_frame(x).map(|f| (x, frame as i64 - f as i64)))
-        .min_by_key(|(_, d)| d.abs())
-    else {
-        unreachable!()
-    };
-    if !(LAB_SPAN.0..LAB_SPAN.1).contains(&d) {
-        return "non-LAB column";
-    }
-    if !used.contains(&(x, y)) {
-        return "LAB, unused";
-    }
-    *hist.entry(d).or_default() += 1;
-    if (32..38).contains(&off) {
-        "used LAB, rows 32-37"
-    } else if used_le_rows.contains(&row) {
-        "used LE rows, not LUT"
-    } else {
-        "used LAB, other LE rows"
+    // A LAB block spans frames lut_frame - 22 ..= lut_frame + 12 (asmdb).
+    let x = (1..=64).find(|&x| le::lut_frame(x).is_some_and(|f| (f as i64 - 22..=f as i64 + 12).contains(&(frame as i64))));
+    match x {
+        None => "non-LAB column",
+        Some(x) if used.contains(&(x, y)) => "used LAB",
+        Some(_) => "unused LAB",
     }
 }
 
-/// Frames of a LAB column relative to its first LUT frame. Guess, refined
-/// from the residual histogram.
-const LAB_SPAN: (i64, i64) = (-17, 18);
+struct Model {
+    dev: Device,
+    lab: cram::lab::LabDb,
+}
+
+impl Model {
+    fn load() -> Result<Self> {
+        Ok(Model { dev: Device::load(&devinfo(), "magellan4")?, lab: cram::lab::LabDb::new(&asmdb()?)? })
+    }
+}
 
 fn check(empty: &Path, dirs: &[String]) -> Result<()> {
-    let dev = Device::load(&devinfo(), "magellan4")?;
+    let m = Model::load()?;
     let base = Rbf::read(empty)?;
     let mut tot = BTreeMap::<String, usize>::new();
-    let mut hist = BTreeMap::<i64, usize>::new();
     for d in dirs {
         let dir = Path::new(d);
-        let des = Design::from_fuzz_dir(&dev, dir)?;
+        let des = Design::load(&m.dev, &m.lab, dir)?;
         let rbf = Rbf::read(&dir.join("build/output_files/top.rbf"))?;
         let obs: HashSet<FrameBit> = base.diff(&rbf).into_iter().collect();
-        let routing: HashSet<FrameBit> = des.routing.iter().copied().collect();
-        let lut_all = des.lut_bits();
-        let (lut_ones, mux_ones) = des.le_ones();
-        let ones: HashSet<FrameBit> = routing.iter().chain(&lut_ones).chain(&mux_ones).copied().collect();
         let mut c = BTreeMap::<String, usize>::new();
-        let mut add = |k: &str, v: usize| *c.entry(k.to_string()).or_default() += v;
-        add("observed", obs.len());
-        add("luts with unknown mask", des.unknown_luts);
-        add("routing predicted", routing.len());
-        add("routing hit", routing.intersection(&obs).count());
-        add("routing polarity err", routing.iter().filter(|b| obs.contains(b) && !rbf.get(**b)).count());
-        add("lut predicted", lut_ones.len());
-        add("lut hit", lut_ones.intersection(&obs).count());
-        // LUT entries predicted to stay 0 but observed flipped.
-        add("lut wrong", lut_all.difference(&lut_ones).filter(|b| obs.contains(b)).count());
-        add("le/io mux predicted", mux_ones.len());
-        add("le/io mux hit", mux_ones.intersection(&obs).count());
-        add("io outputs unmodelled", des.unmodelled_io_outs + des.io_outs.iter().filter(|o| le::io_out_mux(o.x, o.z, o.line).is_none()).count());
-        let used: HashSet<(u32, u32)> = des.les.iter().map(|l| (l.loc.x, l.loc.y)).collect();
-        let used_le_rows: HashSet<u32> = des
-            .les
-            .iter()
-            .flat_map(|l| (0..16).map(move |p| le::lut_bit(l.loc.x, l.loc.y, l.loc.n, p).unwrap().1))
-            .collect();
-        for b in obs.iter().filter(|b| !ones.contains(b) && !lut_all.contains(b)) {
-            add(&format!("residual: {}", categorise(*b, &used, &used_le_rows, &mut hist)), 1);
+        let mut add = |k: String, v: usize| *c.entry(k).or_default() += v;
+        add("observed flips".into(), obs.len());
+        add("conflicting predictions".into(), des.conflicts().len());
+        add("io outputs unmodelled".into(), des.unmodelled_io_outs);
+        for u in &des.logic.unmodelled {
+            eprintln!("{d}: unmodelled: {u}");
+        }
+        add("logic features unmodelled".into(), des.logic.unmodelled.len());
+        let mut predicted = HashSet::new();
+        for &(b, v, src) in &des.bits {
+            predicted.insert(b);
+            let name = format!("{src:?}");
+            add(format!("{name} predicted"), 1);
+            if rbf.get(b) == v {
+                add(format!("{name} right"), 1);
+            } else {
+                add(format!("{name} WRONG"), 1);
+                if std::env::var_os("CRAM_VERBOSE").is_some() {
+                    eprintln!("{d}: {name} wrong at {b}: want {}", u8::from(rbf.get(b)));
+                }
+            }
+        }
+        let used: HashSet<(u32, u32)> = des.logic.les.iter().map(|l| (l.x, l.y)).collect();
+        for b in obs.iter().filter(|b| !predicted.contains(b)) {
+            add(format!("residual: {}", categorise(*b, &used)), 1);
+            if std::env::var_os("CRAM_VERBOSE").is_some() {
+                eprintln!("{d}: residual {b} {}", categorise(*b, &used));
+            }
         }
         println!("{d}: {c:?}");
         for (k, v) in c {
@@ -111,9 +106,6 @@ fn check(empty: &Path, dirs: &[String]) -> Result<()> {
         }
     }
     println!("total over {} designs: {tot:#?}", dirs.len());
-    if std::env::var_os("CRAM_VERBOSE").is_some() {
-        println!("residual frame - lut_frame histogram (used LABs): {hist:?}");
-    }
     Ok(())
 }
 
@@ -146,12 +138,12 @@ fn is_io_region(b: FrameBit) -> bool {
 }
 
 fn assemble(empty: &Path, dir: &Path, out: &Path, io_dirs: &[String]) -> Result<()> {
-    let dev = Device::load(&devinfo(), "magellan4")?;
+    let m = Model::load()?;
     let mut rbf = Rbf::read(empty)?;
-    let des = Design::from_fuzz_dir(&dev, dir)?;
-    let (lut, mux) = des.le_ones();
-    for b in des.routing.iter().chain(&lut).chain(&mux) {
-        rbf.set(*b, true);
+    let des = Design::load(&m.dev, &m.lab, dir)?;
+    anyhow::ensure!(des.conflicts().is_empty(), "model sets {} bits both ways", des.conflicts().len());
+    for &(b, v, _) in &des.bits {
+        rbf.set(b, v);
     }
     let io = shared_io_bits(&Rbf::read(empty)?, io_dirs)?;
     for &(b, v) in &io {
@@ -176,10 +168,12 @@ fn assemble(empty: &Path, dir: &Path, out: &Path, io_dirs: &[String]) -> Result<
         }
     }
     std::fs::write(out, rbf.bytes())?;
-    eprintln!(
-        "assembled {}: {} routing, {} LUT, {} LE/IO-mux bits, {} learned I/O bits",
-        out.display(), des.routing.len(), lut.len(), mux.len(), io.len()
-    );
+    let mut by = BTreeMap::<String, usize>::new();
+    for &(_, _, s) in &des.bits {
+        *by.entry(format!("{s:?}")).or_default() += 1;
+    }
+    eprintln!("assembled {}: model bits {by:?}, {} learned I/O bits, {} unmodelled logic features, {} unmodelled outputs",
+        out.display(), io.len(), des.logic.unmodelled.len(), des.unmodelled_io_outs);
     Ok(())
 }
 
@@ -217,8 +211,9 @@ fn asmdb() -> Result<ddb::asmdb::Asmdb> {
 }
 
 /// The asmdb's LUT bit positions must be the fuzz-fit `le::lut_bit` model
-/// for every LE of every LAB, and its LE input mux must reproduce every
-/// entry of the learned table.
+/// for every LE of every LAB. (It also reproduced all 608 entries of the
+/// LE input-mux table learned from the routing fuzz designs, which it
+/// replaced; README.)
 fn lab_check() -> Result<()> {
     use ddb::asmdb::arch;
     let lab = cram::lab::LabDb::new(&asmdb()?)?;
@@ -242,27 +237,6 @@ fn lab_check() -> Result<()> {
         }
     }
     println!("{} LABs; {n} LUT bits agree with the fuzz-fit model", lab.labs());
-    let (mut ok, mut tot) = (0, 0);
-    for &(line, port, bits) in cram::le_mux_table::LE_INPUT_MUX {
-        let f = lab.feature(arch::LE_LUT_INPUT, port as i32)?;
-        for l in 0..16u32 {
-            let got: std::collections::BTreeSet<_> = f
-                .source_bits(l as usize, line as usize)?
-                .into_iter()
-                .map(|o| addr::frame_bit(lab.flat(30, 10, o).unwrap()))
-                .collect();
-            let want: std::collections::BTreeSet<_> = bits
-                .iter()
-                .map(|&(df, r)| {
-                    let (frame, row) = le::le_bit(30, 10, 2 * l, df as i32, r as u32).unwrap();
-                    addr::frame_bit(row * addr::COLUMNS + addr::LAST_FRAME - frame)
-                })
-                .collect();
-            tot += 1;
-            ok += usize::from(got == want);
-        }
-    }
-    println!("learned LE input mux: {ok}/{tot} (line, port, LE) entries reproduced by the asmdb");
     Ok(())
 }
 

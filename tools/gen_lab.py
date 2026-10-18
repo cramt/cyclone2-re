@@ -100,9 +100,13 @@ for (x, y) in sorted(labs):
         ports = [f".datain({d})", f".clk({clks[k]})", f".ena({enas[k]})"]
         if aclr and rng.random() < 0.7:
             ports.append(f".aclr({aclr})")
-        if sclr and rng.random() < 0.7:
+        # One per-LE bit enables both LAB sync signals (asmdb puts
+        # LE_USE_SYNC_CLEAR and LE_USE_SYNC_LOAD on the same bit), so a
+        # register takes all of the LAB's sync signals or none.
+        sync = rng.random() < 0.7
+        if sclr and sync:
             ports.append(f".sclr({sclr})")
-        if sload and rng.random() < 0.7:
+        if sload and sync:
             # sdata enters through the LE's datac, so it must be the LUT's
             # own datac signal or the LE runs out of inputs.
             ports += [f".sload({sload})", f".sdata({datac or pick()})"]

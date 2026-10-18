@@ -60,21 +60,6 @@ pub fn le_bit(x: u32, y: u32, n: u32, df: i32, r: u32) -> Option<(u32, u32)> {
     Some((frame, lab_row(y) + if le < 8 { off } else { LAB_ROWS - 1 - off }))
 }
 
-/// The two bits selecting LAB local line `line` onto physical LUT input
-/// `port`, as (df, row) for `le_bit`. Learned table, C and D inputs only.
-pub fn input_mux(line: u32, port: u32) -> Option<[(i32, u32); 2]> {
-    crate::le_mux_table::LE_INPUT_MUX
-        .iter()
-        .find(|(l, p, _)| *l as u32 == line && *p as u32 == port)
-        .map(|(_, _, b)| b.map(|(df, r)| (df as i32, r as u32)))
-}
-
-/// Bit that turns on LE output `k` (rcf `LE_BUFFER` index n + k): frame +5,
-/// row 0 for output 0, row 3 for output 1. Seen in every one of 648 cases.
-pub fn output_enable(k: u32) -> (i32, u32) {
-    (5, if k == 0 { 0 } else { 3 })
-}
-
 /// The two bits selecting LAB-local line `line` onto output `z` of the
 /// bottom-row I/O tile at column `x`, as absolute (frame, row). Learned
 /// table; odd z is the mirror image of even z about lut_frame(x) - 2.

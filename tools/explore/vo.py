@@ -4,7 +4,7 @@ port connections. LUT masks here are already in physical input order (the
 .vo agrees with the rcf's route_port)."""
 import re
 
-ATOM = re.compile(r'// Location: (\S+)\n(cycloneii_\w+) (\\\S+ |\S+) \((.*?)\);', re.S)
+ATOM = re.compile(r'// Location: (\S+)\n(cycloneii_\w+) (\\\S+ |[^\s(]+) ?\((.*?)\);', re.S)
 PORT = re.compile(r'\.(\w+)\((.*?)\)(?:,|\s*$)', re.S)
 DEFP = re.compile(r'defparam (\\\S+ |\S+)\s*\.(\w+) = (.*?);')
 

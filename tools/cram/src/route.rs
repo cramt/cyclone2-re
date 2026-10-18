@@ -58,24 +58,31 @@ pub struct Resolved {
 /// tree syntax.
 pub fn resolve(dev: &Device, sig: &Signal) -> Resolved {
     let mut out = Resolved::default();
-    let mut seen: Vec<Node> = Vec::new();
-    for r in &sig.resources {
-        let Some(e) = element_enum(&r.kind) else {
+    let mut nodes: Vec<Option<Node>> = Vec::new();
+    for (i, r) in sig.resources.iter().enumerate() {
+        let node = element_enum(&r.kind).and_then(|e| {
+            let cands: Vec<Node> =
+                dev.at(r.x, r.y, r.z, r.index).iter().copied().filter(|&n| dev.element_enum(n) == e).collect();
+            match cands[..] {
+                [n] => Some(n),
+                _ => None,
+            }
+        });
+        nodes.push(node);
+        let Some(node) = node else {
             out.skipped.push(r.clone());
             continue;
         };
-        let cands: Vec<Node> =
-            dev.at(r.x, r.y, r.z, r.index).iter().copied().filter(|&n| dev.element_enum(n) == e).collect();
-        let [node] = cands[..] else {
-            out.skipped.push(r.clone());
-            continue;
-        };
-        if let Some((src, k)) = seen.iter().rev().find_map(|&s| dev.edge(s, node).map(|k| (s, k))) {
-            out.hops.push(Hop { src, dst: node, edge: k });
-        } else if !seen.is_empty() {
-            out.skipped.push(r.clone());
+        // The rcf tree names each resource's parent (previous line or a
+        // branch_point label); fall back to the latest earlier resource with
+        // an edge for anything the tree doesn't pin down.
+        let parent = sig.parents.get(i).copied().flatten().and_then(|p| nodes[p]).and_then(|p| dev.edge(p, node).map(|k| (p, k)));
+        let hop = parent.or_else(|| nodes[..i].iter().rev().flatten().find_map(|&s| dev.edge(s, node).map(|k| (s, k))));
+        match hop {
+            Some((src, k)) => out.hops.push(Hop { src, dst: node, edge: k }),
+            None if i > 0 => out.skipped.push(r.clone()),
+            None => {}
         }
-        seen.push(node);
     }
     out
 }
