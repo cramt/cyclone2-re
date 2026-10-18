@@ -60,13 +60,6 @@ db:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
     tools/cram/target/release/cram db db
 
-# nextpnr chip database from the committed db/ (build/chipdb/; ~10 min, 2.6 GB RAM, Python only)
-chipdb:
-    mkdir -p build/chipdb
-    python3 $NEXTPNR_CYCLONE2_SHARE/gen_chipdb.py $NEXTPNR_CYCLONE2_SHARE $NEXTPNR_CYCLONE2_SHARE/constids.inc db/EP2C35F672C6/chipdb.txt.xz build/chipdb/chipdb.bba
-    bbasm --le build/chipdb/chipdb.bba build/chipdb/chipdb-EP2C35F672C6.bin
-    rm build/chipdb/chipdb.bba
-
 # Verilog -> yosys -> nextpnr -> cram pack: <dir>/build/top.rbf from <dir>/top.v and <dir>/pins.qsf, no Quartus
 open-build dir:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml

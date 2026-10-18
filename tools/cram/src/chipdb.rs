@@ -1,5 +1,5 @@
 //! nextpnr himbaechel chip database, as a flat text description that
-//! `nextpnr/cyclone2/gen_chipdb.py` turns into a .bba with himbaechel's own
+//! `nextpnr/cyclone2/gen/arch_gen.py` turns into a .bba with himbaechel's own
 //! generator. `cram db` commits it as `db/EP2C35F672C6/chipdb.txt.xz`, so
 //! building the chip database takes Python only.
 //!

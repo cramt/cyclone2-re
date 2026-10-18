@@ -48,12 +48,9 @@
             # the oracle is a 2013 binary, so tools/quartus.sh runs it in an
             # empty network namespace
             util-linux
-            # throwaway exploration scripts in tools/, and nextpnr's chipdb
-            # generator
+            # throwaway exploration scripts in tools/
             python3
           ];
-          # `just chipdb` runs the generator and bbasm this nextpnr ships.
-          NEXTPNR_CYCLONE2_SHARE = "${nextpnr-cyclone2}/share/nextpnr/cyclone2";
         };
       }
     );

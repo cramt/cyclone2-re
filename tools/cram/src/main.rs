@@ -32,7 +32,7 @@ in). `db` and the reverse-engineering commands read Quartus' devinfo/cycloneii
   cram svf <in.rbf> <out.svf>              JTAG configuration of the RBF, CONF_DONE checked
                                            (an RBF itself is not a JTAG stream)
   cram chipdb <out.txt>                    nextpnr chip database description (for
-                                           nextpnr/cyclone2/gen_chipdb.py)
+                                           nextpnr/cyclone2/gen/arch_gen.py)
   cram db <dir>                            <dir>/EP2C35F672C6/: the device database and
                                            chip database text, from Quartus' files"
     );

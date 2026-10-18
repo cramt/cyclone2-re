@@ -1,4 +1,4 @@
-// Ids the uarch and the chip database share (gen_chipdb.py reads this file
+// Ids the uarch and the chip database share (gen/arch_gen.py reads this file
 // so its string pool numbers them the same way).
 X(LAB)
 X(NULL)

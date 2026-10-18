@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
-"""Turn `cram chipdb` output into a himbaechel .bba with nextpnr's own
-generator (himbaechel_dbgen). The text is already flat (one line per wire,
-pip, bel, tile instance and inter-tile node), so this is a transcription.
+"""Turn a cyclone2-re device database into a himbaechel .bba with nextpnr's
+own generator (himbaechel_dbgen). The database's chipdb.txt.xz, written by
+`cram chipdb` (https://github.com/cramt/cyclone2-re), is already flat (one
+line per wire, pip, bel, tile instance and inter-tile node), so this is a
+transcription.
 
-    gen_chipdb.py <dbgen dir> <constids.inc> <chipdb.txt[.xz]> <out.bba>
-
-The cyclone2-re repo commits it xz-compressed as
-db/EP2C35F672C6/chipdb.txt.xz, so building needs Python and that file only.
+    arch_gen.py --db <cyclone2-re>/db --device EP2C35F672C6 --bba <out.bba>
 """
+import argparse
 import lzma
 import sys
+from os import path
 
-sys.path.insert(0, sys.argv[1])
+sys.path.append(path.join(path.dirname(__file__), "../../.."))
 from himbaechel_dbgen.chip import Chip, NodeWire, PinType  # noqa: E402
 
-constids, src, out = sys.argv[2:5]
+parser = argparse.ArgumentParser()
+parser.add_argument("--db", required=True, help="the db/ directory of a cyclone2-re checkout")
+parser.add_argument("--device", required=True)
+parser.add_argument("--bba", required=True)
+args = parser.parse_args()
+
+constids = path.join(path.dirname(__file__), "../constids.inc")
+src = path.join(args.db, args.device, "chipdb.txt.xz")
+out = args.bba
 ch = tt = bel = pkg = None
-with (lzma.open(src, "rt") if src.endswith(".xz") else open(src)) as f:
+with lzma.open(src, "rt") as f:
     for line in f:
         a = line.split()
         k = a[0]

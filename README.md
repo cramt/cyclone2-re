@@ -541,8 +541,7 @@ Verilog → yosys → nextpnr → `cram pack` → `top.rbf`, with no Quartus
 program and no Quartus output involved:
 
 ```
-nix develop
-just chipdb                       # once (~10 min): nextpnr chip database from the committed db/
+nix develop                       # first time ~10 min: builds nextpnr with its chip database from db/
 just open-build examples/blinky   # examples/blinky/build/top.rbf
 ```
 
@@ -558,7 +557,7 @@ xz files:
 | file | size | contents |
 |---|---|---|
 | `device.bin.xz` | 3.2 MB (41.7 MB raw) | magic `C2RE-DB`, format version, then a [postcard](https://postcard.jamesmunns.com/wire-format) encoding of `db::Stored`: the routing graph (376,788 elements, 210,403 templates) and its 7,996,500 routing bits, stored by column as deltas; the asmdb block tables; the 475 bonded user pins of the F672 package with their IOE, bank and dual-purpose role |
-| `chipdb.txt.xz` | 9.2 MB (124.5 MB raw) | `cram chipdb` output, the input of `nextpnr/cyclone2/gen_chipdb.py` |
+| `chipdb.txt.xz` | 9.2 MB (124.5 MB raw) | `cram chipdb` output, the input of `nextpnr/cyclone2/gen/arch_gen.py` |
 
 `cram db` writes `device.bin.xz`, reads it back (it must re-encode to the
 same bytes), and exports `chipdb.txt.xz` from what it read back, so the
@@ -608,9 +607,11 @@ has a fixed bits-0/1 pattern whose meaning is unknown; it is the same in
 all 190 pinned-USERCODE RBFs.
 
 **Chip database** (`tools/cram/src/chipdb.rs` → `db/EP2C35F672C6/chipdb.txt.xz`
-→ `nextpnr/cyclone2/gen_chipdb.py` → bbasm). `just chipdb` needs Python
-and the committed text only; the 242 MB binary in `build/chipdb/` is not
-in git. Each Quartus tile (x, y) is two nextpnr tiles: (2x, y) holds
+→ `nextpnr/cyclone2/gen/arch_gen.py` → bbasm). nextpnr's CMake builds it
+from `HIMBAECHEL_CYCLONE2_DB` (this repo's `db/`) like any himbaechel
+uarch's database, with Python and the committed text only;
+`nix/nextpnr-cyclone2.nix` does that, so the 242 MB binary lives in the
+nix store, not in git. Each Quartus tile (x, y) is two nextpnr tiles: (2x, y) holds
 the routing graph (one wire `G<node>` per element, an alias for every
 foreign element that drives one, one pip per graph edge in its
 destination's tile: 2,440 tile types, 2.29 M wires, 3,104,196 pips), and
@@ -623,7 +624,7 @@ reaches (CE/clear/sync-clear fast-mux maps), carry wires joined LE 15 →
 LE 0 of the LAB below. I/O tiles get IOE bels (data from the IOE's
 `IO_DATA_INPUT` lines, pad-to-core onto both `IO_DATA_IN` paths or the
 clock pin's `CLK_BUFFER`), and 16 clock-control bels sit at their
-`CLKBUF_OUT`. Measured: `just chipdb` takes 9.5 minutes and 2.6 GB peak
+`CLKBUF_OUT`. Measured: generating it takes 9.5 minutes and 2.6 GB peak
 (himbaechel's python generator and bbasm);
 the binary is 242 MB, and nextpnr-himbaechel needs about 330 MB for a
 small design.
@@ -689,8 +690,8 @@ makes the fitter keep the routes. Results, observed:
 
 Quartus' fitter accepts each placement and routing (all routes preserved,
 no legality errors) and TimeQuest reports positive setup and hold slack.
-Built inside `nix develop` (the packaged nextpnr, a chip
-database from `just chipdb`), all four RBFs are identical to the validated
+Built inside `nix develop` (the packaged nextpnr and its chip
+database), all four RBFs are identical to the validated
 ones, also with `~/altera` hidden and `CRAM_DEVINFO` unset (chip database
 and RBFs rebuilt from `db/` alone, byte-identical to those built from
 Quartus' files).

@@ -12,7 +12,7 @@
 //!   Rust types it names (`Stored` down, including `ddb::asmdb::Asmdb` and
 //!   `io::Pin`); bump `VERSION` whenever one of them changes.
 //! - `chipdb.txt.xz`: `cram chipdb` output, the input of
-//!   `nextpnr/cyclone2/gen_chipdb.py` (nextpnr builds with Python only).
+//!   `nextpnr/cyclone2/gen/arch_gen.py` (nextpnr builds with Python only).
 //!   `cram db` exports it from the `device.bin.xz` it just wrote, read back,
 //!   so the two can't drift apart.
 

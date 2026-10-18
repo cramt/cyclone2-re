@@ -2,7 +2,7 @@
  * nextpnr himbaechel uarch for the Altera Cyclone II EP2C35F672C6.
  *
  * The chip database comes from `cram chipdb` (tools/cram/src/chipdb.rs, which
- * documents the tile and wire naming this file relies on) via gen_chipdb.py.
+ * documents the tile and wire naming this file relies on) via gen/arch_gen.py.
  *
  * Cells (from synth/cyclone2.ys):
  *   LCELL_COMB  LUT4 + carry: DATAA..DATAD, CIN -> COMBOUT, COUT; LUT_MASK.

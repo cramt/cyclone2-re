@@ -5,10 +5,9 @@
 # packaged release keeps it reproducible. Remove this derivation if the uarch
 # is ever upstreamed into nextpnr (https://github.com/YosysHQ/nextpnr).
 #
-# Only himbaechel/cyclone2 is built: the chip database is generated from the
-# repo's committed db/EP2C35F672C6/chipdb.txt.xz (`just chipdb`), so the
-# derivation also installs what that needs: bbasm, himbaechel's python
-# generator and our gen_chipdb.py.
+# Only himbaechel/cyclone2 is built, with its chip database generated from the
+# repo's committed db/ the way an upstream build would (HIMBAECHEL_CYCLONE2_DB;
+# ~10 min, 2.6 GB RAM).
 {
   stdenv,
   nextpnr,
@@ -52,15 +51,8 @@ stdenv.mkDerivation {
     "-DBUILD_TESTS=OFF"
     "-DBUILD_PYTHON=OFF"
     "-DUSE_OPENMP=ON"
+    "-DHIMBAECHEL_CYCLONE2_DB=${../db}"
   ];
-
-  postInstall = ''
-    install -Dm755 bba/bbasm $out/bin/bbasm
-    mkdir -p $out/share/nextpnr/cyclone2
-    cp -r ../himbaechel/himbaechel_dbgen $out/share/nextpnr/cyclone2/
-    install -Dm755 ../himbaechel/uarch/cyclone2/gen_chipdb.py $out/share/nextpnr/cyclone2/gen_chipdb.py
-    install -Dm644 ../himbaechel/uarch/cyclone2/constids.inc $out/share/nextpnr/cyclone2/constids.inc
-  '';
 
   meta.mainProgram = "nextpnr-himbaechel";
 }
