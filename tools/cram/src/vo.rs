@@ -19,6 +19,9 @@ pub struct Atom {
     /// marks an inverted connection.
     pub ports: HashMap<String, String>,
     pub params: HashMap<String, String>,
+    /// The rest of the `// Location:` comment. For pins it holds
+    /// `I/O Standard: 3.3-V LVTTL,	 Current Strength: 24mA`.
+    pub loc_note: String,
 }
 
 fn norm(n: &str) -> String {
@@ -70,7 +73,8 @@ pub fn parse(text: &str) -> Vec<Atom> {
     let mut lines = text.lines().peekable();
     while let Some(line) = lines.next() {
         if let Some(loc) = line.trim().strip_prefix("// Location: ") {
-            let loc = loc.split([',', ' ', '\t']).next().unwrap_or("").to_string();
+            let (loc, note) = loc.split_once([',', ' ', '\t']).unwrap_or((loc, ""));
+            let (loc, note) = (loc.to_string(), note.trim_start_matches([',', ' ', '\t']).to_string());
             let Some(head) = lines.next() else { break };
             let Some(rest) = head.trim().strip_prefix("cycloneii_") else { continue };
             let (kind, rest) = rest.split_once(' ').unwrap_or((rest, ""));
@@ -84,7 +88,7 @@ pub fn parse(text: &str) -> Vec<Atom> {
                 }
             }
             by_name.insert(norm(name), atoms.len());
-            atoms.push(Atom { name: norm(name), kind: kind.to_string(), loc, ports: ports(&body), params: HashMap::new() });
+            atoms.push(Atom { name: norm(name), kind: kind.to_string(), loc, ports: ports(&body), params: HashMap::new(), loc_note: note });
         } else if let Some(rest) = line.trim().strip_prefix("defparam ") {
             // defparam \name .param = value;
             let Some((name, rest)) = rest.split_once(" .").or_else(|| rest.split_once('.')) else { continue };
@@ -117,6 +121,10 @@ impl Atom {
     /// A port tied to a real net (not vcc/gnd/unconnected).
     pub fn net(&self, p: &str) -> Option<&str> {
         self.port(p).filter(|n| !matches!(*n, "vcc" | "gnd" | ""))
+    }
+    /// `Key: value` from the location note, e.g. `Current Strength`.
+    pub fn note(&self, key: &str) -> Option<&str> {
+        self.loc_note.split(",").find_map(|f| f.trim().strip_prefix(key)?.strip_prefix(':')).map(str::trim)
     }
     pub fn lut_mask(&self) -> Option<u16> {
         let m = self.params.get("lut_mask")?;

@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use cram::{addr, design::Design, le, rbf::{self, FrameBit, Rbf}};
+use cram::{addr, design::Design, le, rbf::{self, FrameBit, Rbf, RepBit}};
 use ddb::device::Device;
 
 fn usage() -> ! {
@@ -14,10 +14,11 @@ fn usage() -> ! {
   cram addr <flat>...                      flat CRAM address -> frame:bit
   cram routing <design dir>                routing bits an rcf sets, as fN:B
   cram lab-check                           asmdb LAB tables vs the fuzz-fit LUT geometry
-  cram assemble <empty.rbf> <design dir> <out.rbf> [--io <training dir>...]
-      empty RBF + modelled bits, check words recomputed. --io adds the
-      I/O bits every training design shares (same pin set), learned as is.
+  cram assemble <empty.rbf> <design dir> <out.rbf>
+      empty RBF + modelled bits (routing, logic, every pin's IOE), check
+      words recomputed.
   cram compare <ours.rbf> <quartus.rbf>    categorised bit diff
+  cram roundtrip <empty.rbf> <design dir>... assemble each and compare with its RBF
   cram verify <rbf>...                     do all check words match?"
     );
     std::process::exit(2)
@@ -53,11 +54,17 @@ fn categorise(b: FrameBit, used: &HashSet<(u32, u32)>) -> &'static str {
 struct Model {
     dev: Device,
     lab: cram::lab::LabDb,
+    io: cram::io::IoDb,
 }
 
 impl Model {
     fn load() -> Result<Self> {
-        Ok(Model { dev: Device::load(&devinfo(), "magellan4")?, lab: cram::lab::LabDb::new(&asmdb()?)? })
+        let db = asmdb()?;
+        Ok(Model {
+            dev: Device::load(&devinfo(), "magellan4")?,
+            lab: cram::lab::LabDb::new(&db)?,
+            io: cram::io::IoDb::new(&devinfo(), &db)?,
+        })
     }
 }
 
@@ -67,14 +74,25 @@ fn check(empty: &Path, dirs: &[String]) -> Result<()> {
     let mut tot = BTreeMap::<String, usize>::new();
     for d in dirs {
         let dir = Path::new(d);
-        let des = Design::load(&m.dev, &m.lab, dir)?;
+        let des = Design::load(&m.dev, &m.lab, &m.io, dir)?;
         let rbf = Rbf::read(&dir.join("build/output_files/top.rbf"))?;
-        let obs: HashSet<FrameBit> = base.diff(&rbf).into_iter().collect();
+        // Raw frames 0-23 are the replicated frames, compared separately.
+        let obs: HashSet<FrameBit> =
+            base.diff(&rbf).into_iter().filter(|b| b.frame as usize >= rbf::FIRST_CRC_FRAME).collect();
+        let rep_obs: HashSet<RepBit> = base.rep_diff(&rbf).into_iter().collect();
         let mut c = BTreeMap::<String, usize>::new();
         let mut add = |k: String, v: usize| *c.entry(k).or_default() += v;
         add("observed flips".into(), obs.len());
         add("conflicting predictions".into(), des.conflicts().len());
-        add("io outputs unmodelled".into(), des.unmodelled_io_outs);
+        add("pins".into(), des.pins.len());
+        add("replicated-frame flips".into(), rep_obs.len());
+        let mut rep_predicted = HashSet::new();
+        for &(b, v) in &des.rep {
+            rep_predicted.insert(b);
+            add("Io (replicated frames) predicted".into(), 1);
+            add(format!("Io (replicated frames) {}", if rbf.rep_get(b) == v { "right" } else { "WRONG" }), 1);
+        }
+        add("residual: replicated frames".into(), rep_obs.difference(&rep_predicted).count());
         for u in &des.logic.unmodelled {
             eprintln!("{d}: unmodelled: {u}");
         }
@@ -109,31 +127,6 @@ fn check(empty: &Path, dirs: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// I/O-region bits (frames 0-23, top/bottom I/O rows) that differ from
-/// the empty design identically in every training design, leaving out
-/// what the model itself sets in that design (output data muxes, routing
-/// into the I/O rows), so only the pin configuration is copied.
-fn shared_io_bits(m: &Model, base: &Rbf, dirs: &[String]) -> Result<Vec<(FrameBit, bool)>> {
-    let mut common: Option<HashSet<(FrameBit, bool)>> = None;
-    for d in dirs {
-        let rbf = Rbf::read(&Path::new(d).join("build/output_files/top.rbf"))?;
-        let modelled: HashSet<FrameBit> = Design::load(&m.dev, &m.lab, Path::new(d))?.bits.iter().map(|b| b.0).collect();
-        let s: HashSet<(FrameBit, bool)> = base
-            .diff(&rbf)
-            .into_iter()
-            .filter(|b| is_io_region(*b) && !modelled.contains(b))
-            .map(|b| (b, rbf.get(b)))
-            .collect();
-        common = Some(match common {
-            None => s,
-            Some(c) => c.intersection(&s).copied().collect(),
-        });
-    }
-    let mut v: Vec<_> = common.unwrap_or_default().into_iter().collect();
-    v.sort();
-    Ok(v)
-}
-
 fn is_io_region(b: FrameBit) -> bool {
     if (b.frame as usize) < rbf::FIRST_CRC_FRAME {
         return true;
@@ -150,58 +143,65 @@ fn is_io_region(b: FrameBit) -> bool {
     })
 }
 
-fn assemble(empty: &Path, dir: &Path, out: &Path, io_dirs: &[String]) -> Result<()> {
-    let m = Model::load()?;
+fn build(m: &Model, empty: &Path, dir: &Path) -> Result<(Rbf, Design)> {
     let mut rbf = Rbf::read(empty)?;
-    let des = Design::load(&m.dev, &m.lab, dir)?;
+    let des = Design::load(&m.dev, &m.lab, &m.io, dir)?;
     anyhow::ensure!(des.conflicts().is_empty(), "model sets {} bits both ways", des.conflicts().len());
     for &(b, v, _) in &des.bits {
         rbf.set(b, v);
     }
-    let io = shared_io_bits(&m, &Rbf::read(empty)?, io_dirs)?;
-    for &(b, v) in &io {
-        rbf.set(b, v);
-    }
-    // Model bits win over copied pin configuration.
-    for &(b, v, _) in &des.bits {
-        rbf.set(b, v);
+    for &(b, v) in &des.rep {
+        rbf.rep_set(b, v);
     }
     rbf.fix_crcs();
-    // Frames 0-23's check words don't follow the CRC of the other frames
-    // and we can't compute them yet. If every training design has the same
-    // bytes there (true for a fixed pin set), take them verbatim.
-    if let Some(first) = io_dirs.first() {
-        let t = Rbf::read(&Path::new(first).join("build/output_files/top.rbf"))?;
-        let mut same = true;
-        for d in &io_dirs[1..] {
-            let o = Rbf::read(&Path::new(d).join("build/output_files/top.rbf"))?;
-            same &= (0..rbf::FIRST_CRC_FRAME).all(|f| o.frame_bytes(f) == t.frame_bytes(f));
-        }
-        if same {
-            for f in 0..rbf::FIRST_CRC_FRAME {
-                rbf.set_frame_bytes(f, t.frame_bytes(f));
-            }
-            eprintln!("frames 0-23 identical in all {} training designs: copied with their check words", io_dirs.len());
-        }
-    }
+    Ok((rbf, des))
+}
+
+fn assemble(empty: &Path, dir: &Path, out: &Path) -> Result<()> {
+    let m = Model::load()?;
+    let (rbf, des) = build(&m, empty, dir)?;
     std::fs::write(out, rbf.bytes())?;
     let mut by = BTreeMap::<String, usize>::new();
     for &(_, _, s) in &des.bits {
         *by.entry(format!("{s:?}")).or_default() += 1;
     }
-    eprintln!("assembled {}: model bits {by:?}, {} learned I/O bits, {} unmodelled logic features, {} unmodelled outputs",
-        out.display(), io.len(), des.logic.unmodelled.len(), des.unmodelled_io_outs);
+    eprintln!("assembled {}: model bits {by:?} + {} replicated-frame I/O bits, {} pins, {} unmodelled logic features",
+        out.display(), des.rep.len(), des.pins.len(), des.logic.unmodelled.len());
+    Ok(())
+}
+
+/// Assemble each design dir and compare with Quartus's RBF in it.
+fn roundtrip(empty: &Path, dirs: &[String]) -> Result<()> {
+    let m = Model::load()?;
+    let mut same = 0;
+    for d in dirs {
+        let theirs = Rbf::read(&Path::new(d).join("build/output_files/top.rbf"))?;
+        match build(&m, empty, Path::new(d)) {
+            Ok((ours, des)) => {
+                if ours == theirs {
+                    same += 1;
+                    println!("{d}: byte-identical ({} pins)", des.pins.len());
+                } else {
+                    print!("{d}: ");
+                    compare(&ours, &theirs);
+                }
+            }
+            Err(e) => println!("{d}: not assembled: {e:#}"),
+        }
+    }
+    println!("{same} of {} byte-identical", dirs.len());
     Ok(())
 }
 
 fn compare(ours: &Rbf, theirs: &Rbf) {
     let total = ours.bytes().iter().zip(theirs.bytes()).map(|(a, b)| (a ^ b).count_ones()).sum::<u32>();
-    let data = ours.diff(theirs);
+    let data: Vec<FrameBit> =
+        ours.diff(theirs).into_iter().filter(|b| b.frame as usize >= rbf::FIRST_CRC_FRAME).collect();
+    let rep = ours.rep_diff(theirs);
     let mut cats = BTreeMap::<&str, usize>::new();
+    cats.insert("replicated frames", rep.len());
     for b in &data {
-        let k = if (b.frame as usize) < rbf::FIRST_CRC_FRAME {
-            "frames 0-23"
-        } else if is_io_region(*b) {
+        let k = if is_io_region(*b) {
             "I/O rows/columns"
         } else {
             "core"
@@ -213,9 +213,12 @@ fn compare(ours: &Rbf, theirs: &Rbf) {
     println!(
         "{} differing bits in the whole file; {} in frame data {:?}; header/check-word/tail bits {}; \
          frames with a bad check word in ours: {bad_crc}",
-        total, data.len(), cats, total as usize - data.len()
+        total, data.len() + rep.len(), cats, total as usize - data.len() - 4 * rep.len()
     );
     if std::env::var_os("CRAM_VERBOSE").is_some() {
+        for b in &rep {
+            println!("  {b} ours={} quartus={}", u8::from(ours.rep_get(*b)), u8::from(theirs.rep_get(*b)));
+        }
         for b in &data {
             println!("  {b} ours={} quartus={}", u8::from(ours.get(*b)), u8::from(theirs.get(*b)));
         }
@@ -262,14 +265,8 @@ fn main() -> Result<()> {
     let Some(cmd) = args.first() else { usage() };
     match (cmd.as_str(), &args[1..]) {
         ("check", [empty, dirs @ ..]) if !dirs.is_empty() => check(Path::new(empty), dirs)?,
-        ("assemble", [empty, dir, out, rest @ ..]) => {
-            let io_dirs = match rest {
-                [] => &[][..],
-                [flag, dirs @ ..] if flag == "--io" => dirs,
-                _ => usage(),
-            };
-            assemble(Path::new(empty), Path::new(dir), Path::new(out), io_dirs)?
-        }
+        ("assemble", [empty, dir, out]) => assemble(Path::new(empty), Path::new(dir), Path::new(out))?,
+        ("roundtrip", [empty, dirs @ ..]) if !dirs.is_empty() => roundtrip(Path::new(empty), dirs)?,
         ("compare", [ours, theirs]) => compare(&Rbf::read(Path::new(ours))?, &Rbf::read(Path::new(theirs))?),
         ("verify", files) if !files.is_empty() => {
             for f in files {

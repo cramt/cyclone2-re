@@ -13,7 +13,9 @@ pin even when it isn't near that pin's tile (group testing).
 Campaigns:
   roles  default I/O standard (3.3-V LVTTL) and drive, roles only
   attr   roles plus random per-pin drive strength / weak pull-up / bus hold
-  std    roles plus one random I/O standard per bank
+  std    roles plus one random I/O standard per bank (default drive)
+  reg    roles plus I/O-cell registers: a dedicated clock pin clocks
+         FAST_INPUT/OUTPUT/OUTPUT_ENABLE_REGISTER flops on random pins
   unused (with fraction 0) nothing but the unused-pin mode under test,
          taken from the seed: see UNUSED_MODES
 
@@ -71,12 +73,16 @@ def main():
         for b in banks:
             std[b] = rng.choice(list(DRIVES))
 
+    clk = None
+    if campaign == "reg":
+        clk = rng.choice([p for p in allp if p[2] == "clk"])
+        allp = [p for p in allp if p != clk]
     ins, outs, bidirs = [], [], []
     for name, bank, kind in allp:
         if rng.random() >= frac:
             continue
         role = "in" if kind == "clk" else rng.choice(["in", "in", "out", "out", "bidir"])
-        {"in": ins, "out": outs, "bidir": bidirs}[role].append((name, bank))
+        {"in": ins, "out": outs, "bidir": bidirs}[role].append((name, bank, kind))
     if (outs or bidirs) and not ins:
         ins.append(outs.pop() if outs else bidirs.pop())
 
@@ -88,36 +94,61 @@ def main():
         ports.append(f"output [{len(outs)-1}:0] o")
     if bidirs:
         ports.append(f"inout [{len(bidirs)-1}:0] b")
+    if clk:
+        ports.append("input clk")
+        qsf.append(f"set_location_assignment PIN_{clk[0]} -to clk")
+    regs = []  # (port, assignment) for I/O-cell registers
+    # Registered inputs: the flop sits in the input pin's IOE and feeds the
+    # rest of the design as a net named ri<k>.
+    rin = {k for k in range(len(ins)) if clk and rng.random() < 0.5}
         # The bidirs' input side is left dead: feeding it anywhere would
         # need LUTs whose masks the core model doesn't know.
     v.append(f"module top({', '.join(ports)});")
-    for k, (name, bank) in enumerate(ins):
+    for k in sorted(rin):
+        v.append(f"  reg ri{k}; always @(posedge clk) ri{k} <= i[{k}];")
+        regs.append((f"ri{k}", "FAST_INPUT_REGISTER"))
+    src_net = lambda k: f"ri{k}" if k in rin else f"i[{k}]"
+    for k, (name, bank, kind) in enumerate(ins):
         qsf.append(f"set_location_assignment PIN_{name} -to i[{k}]")
-        inst.append((f"i[{k}]", "in", bank))
-    for k, (name, bank) in enumerate(outs):
+        inst.append((f"i[{k}]", "in", bank, kind))
+    for k, (name, bank, kind) in enumerate(outs):
         src = rng.randrange(len(ins))
-        v.append(f"  assign o[{k}] = i[{src}];")
+        if clk and rng.random() < 0.5:
+            v.append(f"  reg ro{k}; always @(posedge clk) ro{k} <= {src_net(src)}; assign o[{k}] = ro{k};")
+            regs.append((f"o[{k}]", "FAST_OUTPUT_REGISTER"))
+        else:
+            v.append(f"  assign o[{k}] = {src_net(src)};")
         qsf.append(f"set_location_assignment PIN_{name} -to o[{k}]")
-        inst.append((f"o[{k}]", "out", bank))
-    for k, (name, bank) in enumerate(bidirs):
+        inst.append((f"o[{k}]", "out", bank, kind))
+    for k, (name, bank, kind) in enumerate(bidirs):
         d, oe = rng.randrange(len(ins)), rng.randrange(len(ins))
-        v.append(f"  assign b[{k}] = i[{oe}] ? i[{d}] : 1'bz;")
+        if clk and rng.random() < 0.5:
+            v.append(f"  reg rd{k}, re{k}; always @(posedge clk) begin rd{k} <= {src_net(d)}; re{k} <= {src_net(oe)}; end")
+            v.append(f"  assign b[{k}] = re{k} ? rd{k} : 1'bz;")
+            regs.append((f"b[{k}]", "FAST_OUTPUT_REGISTER"))
+            regs.append((f"b[{k}]", "FAST_OUTPUT_ENABLE_REGISTER"))
+        else:
+            v.append(f"  assign b[{k}] = {src_net(oe)} ? {src_net(d)} : 1'bz;")
         qsf.append(f"set_location_assignment PIN_{name} -to b[{k}]")
-        inst.append((f"b[{k}]", "bidir", bank))
+        inst.append((f"b[{k}]", "bidir", bank, kind))
     v.append("endmodule")
 
-    for port, role, bank in inst:
+    for port, role, bank, kind in inst:
         s = std[bank]
         if s != "3.3-V LVTTL":
             qsf.append(f'set_instance_assignment -name IO_STANDARD "{s}" -to {port}')
-        if campaign in ("attr", "std"):
+        if campaign == "attr":
             if role != "in" and rng.random() < 0.7:
                 qsf.append(f'set_instance_assignment -name CURRENT_STRENGTH_NEW "{rng.choice(DRIVES[s])}" -to {port}')
-            r = rng.random()
+            # Dedicated clock inputs have neither pull-up nor bus hold
+            # (fitter error 169057).
+            r = rng.random() if kind == "io" else 1
             if r < 0.25:
                 qsf.append(f"set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to {port}")
             elif r < 0.5:
                 qsf.append(f"set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY ON -to {port}")
+    for port, a in regs:
+        qsf.append(f"set_instance_assignment -name {a} ON -to {port}")
     if campaign == "unused":
         qsf.append(f'set_global_assignment -name RESERVE_ALL_UNUSED_PINS "{UNUSED_MODES[seed % len(UNUSED_MODES)]}"')
     if not inst:

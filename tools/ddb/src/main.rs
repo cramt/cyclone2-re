@@ -92,6 +92,35 @@ fn main() -> Result<()> {
                 writeln!(o)?;
             }
         }
+        ("asmdb-json", [f]) => {
+            // Whole asmdb as one JSON document, for exploration scripts.
+            use serde_json::json;
+            let d = container::Ddb::open(&PathBuf::from(f))?;
+            let db = asmdb::parse(&d.body)?;
+            let id = |m: &Option<asmdb::MuxId>| m.map(|m| m.0);
+            let muxes: Vec<_> = db.muxes.iter().map(|m| json!({"bits": m.bits, "kind": format!("{:?}", m.kind)})).collect();
+            let groups: Vec<_> = db
+                .arch_groups
+                .iter()
+                .map(|g| {
+                    let body = match &g.body {
+                        asmdb::ArchBody::Muxed { paths, data, block_info, .. } => json!({
+                            "paths": paths.iter().map(|p| p.iter().map(id).collect::<Vec<_>>()).collect::<Vec<_>>(),
+                            "data": data.iter().map(|d| json!([d.arch_value, id(&d.aux), id(&d.next_selection)])).collect::<Vec<_>>(),
+                            "block_info": block_info,
+                        }),
+                        asmdb::ArchBody::Dumb { arch_value, bits } => json!({"dumb": arch_value, "bits": bits}),
+                        asmdb::ArchBody::Stlmap { paths, .. } => json!({
+                            "paths": paths.iter().map(|p| p.iter().map(id).collect::<Vec<_>>()).collect::<Vec<_>>(),
+                        }),
+                    };
+                    json!({"type": g.arch_type, "block": g.block_type, "index": g.group_index, "body": body})
+                })
+                .collect();
+            let blocks: Vec<_> = db.block_infos.iter().map(|b| json!({"type": b.block_type, "cols": b.num_ram_cols, "lists": b.block_lists, "simple": b.simple_block_lists})).collect();
+            println!("{}", json!({"muxes": muxes, "groups": groups, "blocks": blocks, "block_info_map": db.block_info_map,
+                "default_bits": db.default_bits, "default_mux_settings": db.default_mux_settings, "default_bit_calcs": db.default_bit_calcs}));
+        }
         ("asm-canon", [f]) => {
             use std::io::Write;
             let d = container::Ddb::open(&PathBuf::from(f))?;

@@ -1,7 +1,7 @@
 //! What a placed-and-routed design configures, and the CRAM bits that
 //! follow from it: routing from the rcf + ddb `asm`, LEs and LABs from the
-//! post-fit netlist + rcf + ddb `asmdb` (`logic`), output-pin data muxes
-//! from a learned table.
+//! post-fit netlist + rcf + ddb `asmdb` (`logic`), pins from the netlist,
+//! qsf, rcf, ddb `pad`/`pkg` and the asmdb IOE groups (`io`).
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -11,17 +11,9 @@ use ddb::device::Device;
 
 use crate::lab::LabDb;
 use crate::logic::Logic;
-use crate::rbf::FrameBit;
-use crate::{addr, le, rcf, route, vo};
-
-/// An output pin's data input, in a bottom-row I/O tile: (x, z, LAB-local
-/// line feeding IO_DATAOUT).
-#[derive(Debug, Clone, Copy)]
-pub struct IoOut {
-    pub x: u32,
-    pub z: u32,
-    pub line: u32,
-}
+use crate::io::{self, IoBit, IoDb};
+use crate::rbf::{FrameBit, RepBit};
+use crate::{addr, rcf, route, vo};
 
 /// Where a bit's value came from, for checking and residual accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -30,26 +22,25 @@ pub enum Source {
     Routing,
     /// ddb asmdb: LUT contents, LE input muxes and LE/LAB settings.
     Logic,
-    /// Learned table: bottom-row output pin data mux.
-    IoOutMux,
+    /// ddb pad/pkg/asmdb: I/O element configuration of every pin.
+    Io,
 }
 
 pub struct Design {
     /// Every bit the model fixes, with its value. Later entries win, but
     /// the sources never overlap in practice (checked by `conflicts`).
     pub bits: Vec<(FrameBit, bool, Source)>,
+    /// IOE bits in the replicated frames (`Source::Io`).
+    pub rep: Vec<(RepBit, bool)>,
     pub logic: Logic,
-    pub io_outs: Vec<IoOut>,
-    /// Output pins whose data mux isn't modelled (not bottom row, or a
-    /// line the learned table hasn't seen).
-    pub unmodelled_io_outs: usize,
+    pub pins: Vec<io::PinUse>,
     pub skipped_resources: usize,
 }
 
 impl Design {
     /// A design dir after the oracle: build/top.rcf (back-annotated
     /// routing) and build/simulation/modelsim/top.vo (post-fit netlist).
-    pub fn load(dev: &Device, lab: &LabDb, dir: &Path) -> Result<Self> {
+    pub fn load(dev: &Device, lab: &LabDb, iodb: &IoDb, dir: &Path) -> Result<Self> {
         let sigs = rcf::read(&dir.join("build/top.rcf"))?;
         let (rbits, skipped) = route::bits(dev, &sigs)?;
         let mut bits: Vec<(FrameBit, bool, Source)> = rbits
@@ -66,27 +57,16 @@ impl Design {
         for (flat, v) in logic.bits(lab)? {
             bits.push((addr::frame_bit(flat), v, Source::Logic));
         }
-        let (mut io_outs, mut unmodelled_io_outs) = (Vec::new(), 0);
-        for s in &sigs {
-            for (i, r) in s.resources.iter().enumerate().filter(|(_, r)| r.kind == "IO_DATAOUT") {
-                match i.checked_sub(1).map(|j| &s.resources[j]) {
-                    Some(l) if l.kind == "LOCAL_INTERCONNECT" && r.y == 0 => {
-                        let o = IoOut { x: r.x as u32, z: r.z as u32, line: l.index as u32 };
-                        match le::io_out_mux(o.x, o.z, o.line) {
-                            Some(m) => {
-                                for (frame, row) in m {
-                                    bits.push((to_frame_bit(frame, row), true, Source::IoOutMux));
-                                }
-                                io_outs.push(o);
-                            }
-                            None => unmodelled_io_outs += 1,
-                        }
-                    }
-                    _ => unmodelled_io_outs += 1,
-                }
+        let qsf = std::fs::read_to_string(dir.join("build/top.qsf")).context("back-annotated qsf")?;
+        let pins = io::pin_uses(&atoms, &sigs, &qsf)?;
+        let mut rep = Vec::new();
+        for (b, v) in iodb.bits(&pins)? {
+            match b {
+                IoBit::Core(b) => bits.push((b, v, Source::Io)),
+                IoBit::Rep(b) => rep.push((b, v)),
             }
         }
-        Ok(Design { bits, logic, io_outs, unmodelled_io_outs, skipped_resources: skipped.len() })
+        Ok(Design { bits, rep, logic, pins, skipped_resources: skipped.len() })
     }
 
     /// Bits two sources set to different values.

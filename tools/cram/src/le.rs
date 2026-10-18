@@ -60,19 +60,6 @@ pub fn le_bit(x: u32, y: u32, n: u32, df: i32, r: u32) -> Option<(u32, u32)> {
     Some((frame, lab_row(y) + if le < 8 { off } else { LAB_ROWS - 1 - off }))
 }
 
-/// The two bits selecting LAB-local line `line` onto output `z` of the
-/// bottom-row I/O tile at column `x`, as absolute (frame, row). Learned
-/// table; odd z is the mirror image of even z about lut_frame(x) - 2.
-pub fn io_out_mux(x: u32, z: u32, line: u32) -> Option<[(u32, u32); 2]> {
-    const BOTTOM_IO_ROW: u32 = 2468;
-    let anchor = lut_frame(x)? as i32;
-    let (_, bits) = crate::io_mux_table::IO_OUT_MUX.iter().find(|(l, _)| *l as u32 == line)?;
-    Some(bits.map(|(df, r)| {
-        let df = if z % 2 == 0 { df as i32 } else { -4 - df as i32 };
-        ((anchor + df) as u32, BOTTOM_IO_ROW + r as u32)
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -34,6 +34,10 @@ pub fn element_enum(kind: &str) -> Option<i16> {
         // An LE's direct feedback into its own LAB: index = LE number.
         // Edge-less in the graph; the LE input mux selects it.
         "LOCAL_LINE" => 43,
+        // Input pin into the core: index 0 has 18 fanouts, index 1 has 36
+        // (I/O fuzz designs only ever used index 1). Matched against the
+        // graph the same way as the rest.
+        "IO_DATAIN" => 301,
         _ => return None,
     })
 }
