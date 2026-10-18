@@ -68,10 +68,16 @@ Format details, with every claim marked observed or inferred, are in
   All 376,788 ASM nodes match the trace exactly.
 - **The flat CRAM address maps to RBF frame/bit**, solved below in
   [CRAM addressing](#cram-addressing-phase-4).
-- `asmdb` (`ASMDB_DIE`, `ASMDB_*_MUX`, `ASMDB_BLOCK_INFO`, in
-  libdb_asmdb.so) looks like the per-block (LE, IOE, RAM) mux-to-bit
-  table. Inferred: only its class table is decoded. `bcm2bits` is unused
-  for Cyclone II, because no `.bcm.xml` files exist for this family.
+- **`asmdb` decoded: the block configuration tables** (`tools/ddb/src/asmdb.rs`,
+  details in [docs/ddb-format.md](docs/ddb-format.md#asmdb-asmdb_die-block-configuration)).
+  529 named *arch groups* (`LE_LUT_INPUT`, `LAB_CLOCK_FAST_MUX`,
+  `CLKBUF_CLK_INPUT_SELECT_CYCLONEII`, ...), 17,290 muxes listing their
+  bits, and the base address of every block instance (2,076 LABs, M4K,
+  multiplier, PLL). The group type names come from the enum string table
+  in libdb_asmdb.so. The decode matches the Quartus trace exactly (all
+  muxes, groups and block lists) and parses on all six dies. `bcm2bits`
+  is unused for Cyclone II, because no `.bcm.xml` files exist for this
+  family.
 - Export: `cargo run --release --manifest-path tools/ddb/Cargo.toml --
   export ~/altera/13.0sp1/quartus/common/devinfo/cycloneii magellan4
   specimens/db/magellan4` writes `nodes.csv`, `edges.csv` (dst, src,
@@ -266,17 +272,16 @@ frame bit = byte * 8 + lane     (LSB first, the order rbfdiff prints)
   8-15). Stored inverted, so an unused LUT is 0 (mask 0xffff). This
   matches the phase-1 table and all 918 LUTs of the fuzz designs.
 
-**LE- and I/O-level muxes, learned tables** (not from the device DB):
+**LE- and I/O-level muxes.** These started as learned tables and are
+now read from the asmdb (see [LE, LAB and clock configuration](#le-lab-and-clock-configuration-phase-3)):
 
-- Local line → LUT input: 2 bits per input, at frames −13..−2 from the
-  LUT, rows 2-3 of the LE. A two-level mux: the first bit picks one of 8
-  (frame, row) slots, the second one of 3 frames. Learned per (local line
-  index, physical port) by `tools/explore/le_mux_table.py` into
-  `tools/cram/src/le_mux_table.rs`. Only DATAC and DATAD inputs are
-  covered, because the fitter put every one-input buffer on C or D.
-- LE output enable: rcf `LE_BUFFER` index n + k drives a net ⇒ one bit at
-  frame `lut_frame + 5`, LE row 0 (k = 0) or 3 (k = 1). 648 of 648 cases.
-- Bottom-row output pins: 2 bits per pin selecting the local line into
+- Local line → LUT input: a two-level mux, 2 bits per input. The table
+  learned for C/D from these designs (608 (line, port, LE) entries) is
+  reproduced exactly by the asmdb `LE_LUT_INPUT` groups, which also cover
+  A/B. The learned table is deleted.
+- LE output enable: the "output enable" bit at `lut_frame + 5` is
+  `LE_REG_OUT_YGR`, LUT-vs-register select for the output.
+- Bottom-row output pins (still learned, I/O side): 2 bits per pin selecting the local line into
   `IO_DATAOUT`, rows 2476-2477. Odd z mirrors even z about
   `lut_frame(X) − 2`. Learned table (`io_mux_table.py`); lines 2, 15, 17,
   19 and above 20 unseen.
@@ -316,9 +321,96 @@ them) plus the check words of the 2 frames.
 
 What that does and doesn't show: routing, LUT placement/contents and the
 CRAM address map are modelled from first principles plus the device DB.
-The LE input mux and output-pin mux are learned lookup tables. The pin
-I/O config and frames 0-23 are copied, so a design with a different pin
-set needs its own training designs.
+The output-pin mux is a learned lookup table. The pin I/O config and
+frames 0-23 are copied, so a design with a different pin set needs its
+own training designs. (Re-run after the asmdb LE model replaced the
+learned LE tables: same result, 16 of 17 byte-identical, g2006 as above.)
+
+### LE, LAB and clock configuration (phase 3)
+
+Everything an LE, a LAB and a global clock control block configures is
+named and placed by the asmdb. `cram lab-check` confirms the asmdb
+`LE_LUT_FUNCTION` positions equal the fuzz-fit LUT model for all 531,456
+LUT bits (2,076 LABs × 16 LEs × 16). A LAB block is 70 CRAM rows × 35
+columns, based at `lab_row(y)` and frame `lut_frame(x) + 12`, so it spans
+frames `lut_frame − 22 ..= lut_frame + 12`.
+
+The design side comes from the post-fit netlist (`just netlist <dir>`,
+`build/simulation/modelsim/top.vo`). It has LUT masks in physical input
+order, `sum_lutc_input`, carry nets and register ports. The `.rcf` says
+which LAB line or LE feedback (`LOCAL_LINE`, index = LE) feeds each LE
+input, which LAB control line (`LAB_CONTROL_MUX` 0-3) carries each
+ENA/ACLR/SCLR/SLOAD, and which row-clock buffer (`BLK_CLK_BUF` 0-5)
+clocks the LAB. `tools/cram/src/logic.rs` turns that into settings.
+
+Where the setting is a mux input, its bits come from the asmdb maps. For
+the input muxes, `aux` gives the source's first-level bit and
+`next_mux_selection` its second-level bit. Sources 0-37 are local lines
+and 38-53 are LE outputs. That covers LE inputs A-D, LAB control lines,
+LAB clock (sources 4-9 = `BLK_CLK_BUF` 0-5), CE/sclr/sload/aclr fast
+muxes, and clkctrl input select. Where the asmdb only names a bit, the
+value was **read off the fuzz designs** (`tools/gen_lab.py`, 9 designs,
+54 LABs, 6 control sets each):
+
+| group | value (observed) |
+|---|---|
+| `LE_USE_CARRY` | 1 when LUT C comes from a real carry-in net |
+| `LE_USE_REGISTER_FEEDBACK` | 1 when LUT C is the LE's own register, unrouted |
+| `LE_REG_OUT_YGR[0..2]` | per output (LE_BUFFER n, n+1, LOCAL_LINE): 1 = LUT, 0 = register |
+| `LE_CLOCK_SELECT` | LAB clock index (empty design: 1) |
+| `LE_CLEAR_SELECT` | 0 = aclr line 0; registers without aclr read 1 |
+| `LE_USE_SYNC_CLEAR` = `LE_USE_SYNC_LOAD` | one shared bit: register takes the LAB's sclr *and* sload |
+| `LAB_INVERT` 0 / 2 | LAB clock 0 / 1 inverted |
+| `LAB_ENABLE_CE` j, `LAB_INVERT` 1 / 3 | both drop to 0 when clock j has a (non-inverted) enable |
+| `LAB_INVERT` 5 / 4 | sclr used, non-inverted ⇒ 1 / sload used, non-inverted ⇒ 0 |
+| `LAB_ENABLE_SYNC_SIGNALS` | 3-bit code: none 101, sclr 001, sload 111, sload tied high 100 |
+| `LAB_CLEAR_FAST_MUX` | encoded: setting s sets bit s−1; a global aclr goes on both lines, with `LAB_CLR_INVERT_PAIR` = 11 |
+| `CLKBUF_CLK_INPUT_SELECT_CYCLONEII` | `CLKBUF_IN` index, LSB first (unused 111); `CLKBUF_ENABLE_MODE` = 1 |
+
+Fitter choices that the bitstream doesn't record and the model has to
+reproduce, observed:
+
+- CE 1 only reaches control lines 0/1 and CE 0 only lines 2/3 (asmdb
+  maps). An enabled clock domain therefore takes the LAB clock its
+  enable's line dictates. Otherwise inverted clocks come first, then the
+  lowest `BLK_CLK_BUF`. This is fit to 7 two-clock LABs.
+- Register packing: a register beside an unrelated LUT is fed through
+  sdata (= the LE's datac mux) with sload tied high (`sload(vcc)` in
+  the netlist).
+- Register-only LEs get a `~feeder` LUT.
+
+**Global clocks** run through the routing graph: pin `CLK_BUFFER` (289)
+→ `CLKBUF_IN` (513) | clkctrl | `CLKBUF_OUT` (515) → `GLOBAL_CLK_H` (292,
+index = G) → `GLOBAL_CLK_V` (293, `GCLK<n>`) → `LAB_CLK` (294, `RCLK`)
+→ `BLK_CLK_BUF` (560). The GCLK → RCLK edges use the asm "encoded"
+bits (9 per edge), whose value is `is_encoded_bit_high`, not 1. The
+only non-graph bits are the clkctrl input select and enable above.
+
+**Validation.** `cram check` on the 9 LE/LAB fuzz designs plus the
+26-bit counter: 23,299 logic and 11,852 routing bits predicted, all
+right. No unexplained bit is left in any LAB, the clock network or the
+clock controls. What remains is I/O (frames 0-23, I/O rows and columns).
+
+Held out: counters (`tools/gen_counter.py`) that played no part in
+fitting the rules. They vary width (20-32), placement (free and pinned,
+chains crossing LAB rows), clock pin (N2 = CLOCK_50, D13 = CLOCK_27),
+and enable + `!KEY[0]` sync clear. `cram assemble` copies the pin I/O
+config leave-one-out from designs with the same pin set:
+
+| design | result |
+|---|---|
+| c24p, c26k, c28kp, c26e, c22e, cnt26 | byte-identical |
+| c20, c32p | 2 data bits: an LED output on a local line the learned I/O mux table hasn't seen |
+
+The 9 fuzz designs reassembled leave-one-out: see the phase table.
+c26e found the one rule the fuzz designs had missed: an inverted sclr
+clears `LAB_INVERT` 5. The model now tracks port inversion.
+
+Not covered: LAB clocks from local routing rather than a global, two
+different aclr signals in one LAB, inverted aclr, a second clock domain
+sharing a buffer, `LE_USE_REG_CASCADE_ARM` (never seen changing), M4K,
+multipliers and PLLs. These are flagged as `unmodelled` rather than
+guessed.
 
 Nothing from Quartus gets redistributed. The repo ships only the derived bit
 database and our own tools.
@@ -330,8 +422,8 @@ database and our own tools.
 | 0 | Sandboxed oracle: generated design → chipsmith → `.sof`/`.rbf`, no network | done: `tools/oracle.sh`, verified offline |
 | 1 | Container format: SOF/RBF framing, header, CRC, frame layout | RBF layout and frame CRC known for frames 24+, `cram assemble` writes valid check words; frames 0-23 (content and check scheme) and the header option words not decoded; SOF not looked at |
 | 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | LAB grid and its CRAM frame/row placement observed; M4K/multiplier/clock columns known only as frame widths |
-| 3 | Logic: LUT truth tables, FF modes, carry chains | LUT bits for every LAB/LE position (observed on 918 LUTs); LE input mux for C/D and output enables as learned tables; FF/carry not started |
-| 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clock networks untested |
+| 3 | Logic: LUT truth tables, FF modes, carry chains | asmdb decoded. LUT, LE inputs A-D, carry, registers, packing, LAB clocks/CE/aclr/sclr/sload placed by the asmdb, setting values fit on 9 fuzz designs. A real counter assembles byte-identical; 6 of 8 held-out counters are byte-identical, the other 2 miss only an I/O-table entry |
+| 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clocks (pin → clkctrl → GCLK → RCLK → LAB) modelled: graph plus asmdb clkctrl select, checked on 2 clock pins and 4 global nets |
 | 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | not started |
 | 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | not started |
 | 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | not started |

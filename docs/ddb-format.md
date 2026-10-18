@@ -283,10 +283,57 @@ The groups correspond to fanout edges of the **source** element.
   ("CRAM addressing"); `tools/cram/src/addr.rs` implements it.
 
 `DEV_ASM_INFO` in libddb_dev.so is different. It holds the `asmdb` and
-`asmdb_dirt` files (`ASMDB_DIE`, `ASMDB_*_MUX`, `ASMDB_BLOCK_INFO`),
-implemented in libdb_asmdb.so. These look like the block-level (LE, IOE,
-RAM) mux-to-bit tables. **[inf]** They are not decoded yet. Their class
-table parses.
+`asmdb_dirt` files, implemented in libdb_asmdb.so. `asmdb` is decoded
+below.
+
+### `asmdb`: `ASMDB_DIE`: block configuration
+
+The body is zlib-compressed (see the outer container). `tools/ddb/src/asmdb.rs`
+reads it, and `ddb asmdb-canon` matches the trace. **[obs]**
+
+- **No class tags on deferred bodies.** The reader knows each pending
+  object's class from the `new` pointer that created it. Pointer tables
+  are drained LIFO: the most recently created table with pending objects
+  is written next, completely and in id order. A table that gets new
+  objects after being drained goes back on top. The tables are arch groups
+  (`ARCH_GROUP_CALC/STD/DUMB/STLMAP*`), muxes (all `*_MUX` classes),
+  defaults (`DEFAULT_MUX_SETTING` + `DEFAULT_BIT_CALC`), block infos and
+  index maps. **[obs]**
+- Strings are an i32 exact length plus bytes, with no NUL counted
+  (unlike `c_str` in routing). Containers held by pointer (block lists,
+  index maps, export maps) are preceded by a one-byte presence flag.
+  **[obs]**
+- Deltas: `m_mux_bits` element 0 is a delta against element 0 of the
+  previous mux of *any* class (they share the `ASMDB_MUX` base);
+  `ARCH_GROUP_DUMB::m_bits` works the same way. Block list vectors and
+  `m_simple_block_lists` values restart from 0 in every object. **[obs]**
+- `ASMDB_DIE`: bit counts, three strings, `m_block_info_map` (block
+  type → `BLOCK_INFO`), 529 arch groups, 46 defaults, 928 default bits,
+  4 labelled index muxes (`le_abs2loc`, `le2lab`, `row_abs2loc`,
+  `row2mac`), and five empty vectors. **[obs]**
+- `ARCH_GROUP_BASE`: `m_group_index` (delta), `m_type`
+  (`ASMDB_ARCH_GROUP_TYPE`), `m_group_block_type`. CALC/STD continue
+  with `m_mux_path_list` (per path, a list of mux pointers, one per mux
+  level) and `m_mux_data_list` (`arch_value`, `aux_mux`,
+  `next_mux_selection`). CALC adds `m_block_info` and two index-map
+  mux pointers. DUMB is `arch_value` plus a bit list. **[obs]**
+- The type names are the libdb_asmdb.so translator table: 4,585 string
+  pointers (`.data.rel.ro` 0x30c160, 64-bit lib), indexed by enum value.
+  Arch groups of one block type all get sensible names under it (LAB =
+  18: `LE_LUT_INPUT`, `LAB_CLOCK_FAST_MUX`, ...; IOE = 5/6; M4K = 39;
+  MAC = 41; PLL = 43; clkctrl = 75). **[obs]** for the table, **[inf]**
+  that it is exactly what `asmdb_get_debug_string` returns.
+- `BLOCK_INFO` (CALC groups): one `row << 16 | column` base per block
+  instance. A mux bit is a flat-address offset from that base. LAB
+  blocks are 70 × 35 (`m_simple_block_lists`) and there are 2,076 of
+  them. **[obs]** STD/DUMB groups (IOE, clkctrl) hold absolute flat
+  addresses. **[obs]** on the clkctrl groups.
+- Mux semantics, from comparing against fuzz designs: a path is one
+  instance (one per LE for LE groups). For a source mux, `aux[source]`
+  is the first-level bit index and `next[source]` the second-level one
+  (−2 = unreachable). An encoded single-level mux with setting s sets
+  bit s−1. A `DECISION_MUX` has a −3 sentinel plus one real bit. **[obs]**
+  on the LAB and clkctrl groups, not checked elsewhere.
 
 libddb_bcm2bits.so reads `*.bcm.xml` files. No such files exist for
 `cycloneii`, so it plays no part in this family. **[inf]**
@@ -411,5 +458,6 @@ ASM node count equal to element count, and all edges inside the graph.
 - `DEV_ELEMENT_ENUM` value names.
 - The meaning of exclusion groups, and of the
   `use_encoded_setting`/`is_encoded_bit_high` bits (about 1.5% of bits).
-- `asmdb` (block config muxes), `place` and `timing`.
+- `asmdb`: IOE, M4K, MAC and PLL group semantics (decoded, unused);
+  `asmdb_dirt`, `place` and `timing`.
 - Most `pad`/`pkg` info-body slots. Only the ones in the table above are named.
