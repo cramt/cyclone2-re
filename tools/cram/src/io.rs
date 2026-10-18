@@ -38,7 +38,12 @@ mod arch {
     pub const IO_SELECT_IOST_DIRT: i32 = 96;
     pub const IO_PIA_TO_OE: i32 = 105;
     pub const IO_REG_FEEDS_PIN_OUT_YGR: i32 = 109;
+    pub const IO_INREG_CLK_FAST_MUX: i32 = 89;
+    pub const IO_OUTREG_CLK_FAST_MUX: i32 = 93;
     pub const IO_DATA_INVERT: i32 = 118;
+    pub const IO_USE_CLR_INREG: i32 = 164;
+    pub const IO_USE_CLR_OEREG: i32 = 165;
+    pub const IO_USE_CLR_OUTREG: i32 = 166;
     pub const IO_OE_INVERT: i32 = 122;
     pub const IO_SET_CE_TO_OEREG_TIE_OFF: i32 = 130;
     pub const IO_SET_CE_TO_OUTREG_TIE_OFF: i32 = 131;
@@ -264,6 +269,12 @@ pub struct PinUse {
     /// Which of the two pad-to-core paths (`IO_DATAIN` index) the input
     /// drives the core through.
     pub datain_used: [bool; 2],
+    /// I/O-cell registers, each with the I/O row clock buffer
+    /// (`BLK_CLK_BUF` index) that clocks it. The OE register shares the
+    /// output clock.
+    pub in_reg: Option<u32>,
+    pub out_reg: Option<u32>,
+    pub oe_reg: bool,
 }
 
 /// `set_instance_assignment -name <NAME> ON -to <port>` in a qsf.
@@ -286,9 +297,17 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
     // rcf sinks into pins: (port, DATAIN|OE) -> local line feeding it.
     let mut lines: HashMap<(String, String), u32> = HashMap::new();
     let mut datain: HashMap<String, [bool; 2]> = HashMap::new();
+    // (port, INCLK|OUTCLK) -> I/O clock buffer index.
+    let mut clocks: HashMap<(String, String), u32> = HashMap::new();
     for s in sigs {
         for d in &s.dests {
             let Some(from) = d.from else { continue };
+            if ["INCLK", "OUTCLK"].contains(&d.port.as_str()) {
+                let r = &s.resources[from];
+                ensure!(r.kind == "BLK_CLK_BUF", "{}: I/O register clock from {}", s.name, r.kind);
+                clocks.insert((d.cell.clone(), d.port.clone()), r.index as u32);
+                continue;
+            }
             if !["IO_DATAOUT", "IO_OE_PIN"].contains(&s.resources[from].kind.as_str()) {
                 continue;
             }
@@ -316,6 +335,18 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
             Some(s) => Some(s.strip_suffix("mA").and_then(|n| n.parse().ok()).with_context(|| format!("{}: current {s}", a.name))?),
         };
         let data_line = lines.get(&(port.clone(), "DATAIN".into())).copied();
+        let reg = |mode: &str| a.params.get(mode).is_some_and(|m| m == "register");
+        for p in ["areset", "sreset"] {
+            ensure!(a.net(p).is_none(), "{}: I/O register {p} isn't modelled", a.name);
+        }
+        for p in ["inclkena", "outclkena"] {
+            ensure!(a.port(p) == Some("vcc"), "{}: I/O register {p} isn't modelled", a.name);
+        }
+        let clock = |c: &str| clocks.get(&(port.clone(), c.to_string())).copied().with_context(|| format!("{}: {c} not in the rcf", a.name));
+        let in_reg = if reg("input_register_mode") { Some(clock("INCLK")?) } else { None };
+        let out_reg = if reg("output_register_mode") { Some(clock("OUTCLK")?) } else { None };
+        let oe_reg = reg("oe_register_mode");
+        ensure!(!oe_reg || out_reg.is_some(), "{}: OE register without output register isn't modelled", a.name);
         let data_const = match a.port("datain") {
             Some("gnd") => Some(false),
             Some("vcc") => Some(true),
@@ -330,8 +361,17 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
             data_line,
             data_const,
             oe_line: lines.get(&(port.clone(), "OE".into())).copied(),
-            datain_used: datain.get(&port).copied().unwrap_or_default(),
+            // The rcf names the input's core net: the pin itself for a
+            // combinational input, the register output for a registered one.
+            datain_used: [Some(port.as_str()), a.net("regout"), a.net("combout")]
+                .into_iter()
+                .flatten()
+                .filter_map(|n| datain.get(n))
+                .fold([false; 2], |acc, d| [acc[0] | d[0], acc[1] | d[1]]),
             port,
+            in_reg,
+            out_reg,
+            oe_reg,
         });
     }
     Ok(out)
@@ -382,8 +422,10 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
     use arch::*;
     let mut v: Vec<Setting> = Vec::new();
     if matches!(block, BLOCK_ROW | BLOCK_COL) {
+        // Pin mode: an OE register selects mode code 0 instead of 1
+        // (asmdb map 1,1,1,3,3,0,2; which setting is which is unknown).
+        v.push((IO_PIN_MODE, -1, if u.oe_reg { &[0, 0] } else { &[1, 0] }));
         v.extend([
-            (IO_PIN_MODE, -1, &[1u8, 0][..]),
             (IO_SET_CE_TO_OEREG_TIE_OFF, -1, &[1][..]),
             (IO_SET_CE_TO_OUTREG_TIE_OFF, -1, &[1][..]),
             (IO_USE_OUTPUT_DUTY_CYCLE, -1, &[1, 1][..]),
@@ -412,11 +454,36 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
             }
         }
         // Each pad-to-core path the input drives turns on its delay
-        // setting (observed: 287 of 287 routed inputs; unrouted inputs 0).
+        // setting (observed: 287 of 287 routed inputs; unrouted inputs 0),
+        // with the third bit set when the path starts at the input register.
         for (k, &on) in u.datain_used.iter().enumerate() {
             if on {
-                v.push((IO_SET_PAD_TO_CORE_DUAL_FUNC_DELAY_MAG, k as i32, &[1, 1, 0]));
+                v.push((IO_SET_PAD_TO_CORE_DUAL_FUNC_DELAY_MAG, k as i32, if u.in_reg.is_some() { &[1, 1, 1] } else { &[1, 1, 0] }));
             }
+        }
+        // Registers: no clear (the USE_CLR bits read 1 then), clock from
+        // the row clock buffer. The clock fast mux is one-hot, bit =
+        // buffer index + 1 (observed for buffers 4 and 5).
+        const ONE_HOT: [&[u8]; 6] = [
+            &[0, 1, 0, 0, 0, 0, 0],
+            &[0, 0, 1, 0, 0, 0, 0],
+            &[0, 0, 0, 1, 0, 0, 0],
+            &[0, 0, 0, 0, 1, 0, 0],
+            &[0, 0, 0, 0, 0, 1, 0],
+            &[0, 0, 0, 0, 0, 0, 1],
+        ];
+        let clk = |b: u32| ONE_HOT.get(b as usize).copied().with_context(|| format!("{}: I/O clock buffer {b}", u.pin));
+        if let Some(b) = u.in_reg {
+            v.push((IO_INREG_CLK_FAST_MUX, -1, clk(b)?));
+            v.push((IO_USE_CLR_INREG, -1, &[1]));
+        }
+        if let Some(b) = u.out_reg {
+            v.push((IO_OUTREG_CLK_FAST_MUX, -1, clk(b)?));
+            v.push((IO_USE_CLR_OUTREG, -1, &[1]));
+            v.push((IO_REG_FEEDS_PIN_OUT_YGR, -1, &[1, 0]));
+        }
+        if u.oe_reg {
+            v.push((IO_USE_CLR_OEREG, -1, &[1]));
         }
     } else {
         ensure!(u.role == Role::In, "{}: dedicated clock pin used as {:?}", u.pin, u.role);

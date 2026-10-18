@@ -38,6 +38,9 @@ pub fn element_enum(kind: &str) -> Option<i16> {
         // (I/O fuzz designs only ever used index 1). Matched against the
         // graph the same way as the rest.
         "IO_DATAIN" => 301,
+        // Top/bottom I/O clock spine (`BIOCLK..`/`TIOCLK..`): GCLK -> I/O
+        // row clock buffers, like LAB_CLK for LABs.
+        "TB_IO_CLK" => 298,
         _ => return None,
     })
 }
