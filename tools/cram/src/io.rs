@@ -11,9 +11,9 @@
 //!
 //! Assembly writes every bit of every IOE's footprint, so the result
 //! doesn't depend on which pins the base image happened to use. The one
-//! exception is the reserved dual-purpose configuration pins (ASDO, nCSO,
-//! nCEO): unused, they keep the base image's configuration, which Quartus
-//! sets from device options rather than the design.
+//! dual-purpose configuration pins (ASDO, nCSO: inputs with pull-up; nCEO:
+//! an output), which Quartus configures from device options when the
+//! design doesn't claim them, at their bank's I/O standard.
 
 use anyhow::{bail, ensure, Context, Result};
 use std::collections::{BTreeMap, HashMap};
@@ -146,8 +146,17 @@ pub struct Pin {
     pub name: String,
     pub ioe: Ioe,
     pub xyz: (u16, u16, u8),
-    /// Reserved dual-purpose configuration pin (ASDO, nCSO, nCEO).
-    pub dual_purpose: bool,
+    pub bank: i32,
+    pub dual_purpose: Option<DualPurpose>,
+}
+
+/// Configuration pins that double as user I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DualPurpose {
+    /// ASDO, nCSO: active serial flash interface, inputs with pull-up.
+    SerialFlash,
+    /// nCEO: chip-enable out, an output.
+    Nceo,
 }
 
 fn mux_bits(db: &Asmdb, m: &Option<MuxId>) -> Vec<i32> {
@@ -186,8 +195,14 @@ impl IoDb {
             let [p] = m.pads.as_slice() else { continue };
             let Some(&ioe) = ioe_of.get(&p.id) else { continue };
             let f = p.function.as_deref().unwrap_or("");
-            let dual_purpose = ["ASDO", "nCSO", "nCEO"].iter().any(|k| f.contains(k));
-            pins.insert(m.pin.name.clone(), Pin { name: m.pin.name.clone(), ioe, xyz: p.loc.unwrap(), dual_purpose });
+            let dual_purpose = if f.contains("nCEO") {
+                Some(DualPurpose::Nceo)
+            } else if f.contains("ASDO") || f.contains("nCSO") {
+                Some(DualPurpose::SerialFlash)
+            } else {
+                None
+            };
+            pins.insert(m.pin.name.clone(), Pin { name: m.pin.name.clone(), ioe, xyz: p.loc.unwrap(), bank: p.bank, dual_purpose });
         }
 
         let mut features = BTreeMap::new();
@@ -244,6 +259,42 @@ impl IoDb {
     }
 }
 
+/// I/O standards the model knows (single-ended, no VREF).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standard {
+    Lvttl33,
+    Lvcmos33,
+    V25,
+    V18,
+    V15,
+}
+
+impl Standard {
+    /// Row IOE default current (what Quartus gives nCEO).
+    fn row_default_ma(self) -> u32 {
+        match self {
+            Standard::Lvttl33 => 24,
+            Standard::Lvcmos33 => 24,
+            Standard::V25 => 8,
+            Standard::V18 => 12,
+            Standard::V15 => 6,
+        }
+    }
+    fn low_voltage_input(self) -> bool {
+        matches!(self, Standard::V18 | Standard::V15)
+    }
+    fn parse(s: &str) -> Result<Self> {
+        Ok(match s {
+            "3.3-V LVTTL" => Standard::Lvttl33,
+            "3.3-V LVCMOS" => Standard::Lvcmos33,
+            "2.5 V" => Standard::V25,
+            "1.8 V" => Standard::V18,
+            "1.5 V" => Standard::V15,
+            _ => bail!("I/O standard {s:?} isn't modelled"),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     In,
@@ -257,6 +308,7 @@ pub struct PinUse {
     pub pin: String,
     pub port: String,
     pub role: Role,
+    pub standard: Standard,
     /// mA, outputs and bidirs only.
     pub drive: Option<u32>,
     pub pull_up: bool,
@@ -330,6 +382,7 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
             Some("bidir") => Role::Bidir,
             m => bail!("{}: operation_mode {m:?}", a.name),
         };
+        let standard = Standard::parse(a.note("I/O Standard").with_context(|| format!("{}: no I/O standard", a.name))?)?;
         let drive = match a.note("Current Strength") {
             None | Some("Default") => None,
             Some(s) => Some(s.strip_suffix("mA").and_then(|n| n.parse().ok()).with_context(|| format!("{}: current {s}", a.name))?),
@@ -355,6 +408,7 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
         out.push(PinUse {
             pin,
             role,
+            standard,
             drive,
             pull_up: pull.contains(&port),
             bus_hold: hold.contains(&port),
@@ -418,7 +472,7 @@ fn unused_settings(block: i32, mode: UnusedPins) -> Vec<Setting> {
     if matches!(block, BLOCK_ROW | BLOCK_COL) {
         v.extend([(IO_PIN_MODE, -1, &[1u8, 0][..]), (IO_REG_FEEDS_PIN_OUT_YGR, -1, &[1, 0][..])]);
         match mode {
-            UnusedPins::OutputGround => v.push((IO_SET_DRIVE_STRENGTH_ARMSTRONG, -1, drive_code(block, 24).unwrap())),
+            UnusedPins::OutputGround => v.push((IO_SET_DRIVE_STRENGTH_ARMSTRONG, -1, drive_code(block, Standard::Lvttl33, 24).unwrap())),
             _ => v.push((IO_OE_INVERT, -1, &[1])),
         }
         match mode {
@@ -430,23 +484,62 @@ fn unused_settings(block: i32, mode: UnusedPins) -> Vec<Setting> {
     v
 }
 
-/// 3.3-V LVTTL drive strength codes (`IO_SET_DRIVE_STRENGTH_ARMSTRONG`),
-/// observed per current on the fuzz designs. Row IOEs have 8 bits,
-/// column IOEs 10.
-fn drive_code(block: i32, ma: u32) -> Option<&'static [u8]> {
-    Some(match (block, ma) {
-        (BLOCK_ROW, 4) => &[1, 0, 0, 0, 1, 0, 0, 0],
-        (BLOCK_ROW, 8) => &[0, 1, 0, 0, 0, 1, 0, 0],
-        (BLOCK_ROW, 12) => &[1, 1, 0, 0, 1, 1, 0, 0],
-        (BLOCK_ROW, 16) => &[1, 0, 1, 0, 0, 0, 1, 0],
-        (BLOCK_ROW, 20) => &[0, 1, 1, 0, 1, 0, 1, 0],
-        (BLOCK_ROW, 24) => &[1, 1, 1, 0, 0, 1, 1, 0],
-        (BLOCK_COL, 4) => &[1, 0, 0, 0, 0, 1, 0, 0, 0, 0],
-        (BLOCK_COL, 8) => &[0, 1, 0, 0, 0, 0, 1, 0, 0, 0],
-        (BLOCK_COL, 12) => &[1, 1, 0, 0, 0, 1, 1, 0, 0, 0],
-        (BLOCK_COL, 16) => &[1, 0, 1, 0, 0, 0, 0, 1, 0, 0],
-        (BLOCK_COL, 20) => &[0, 1, 1, 0, 0, 1, 0, 1, 0, 0],
-        (BLOCK_COL, 24) => &[1, 1, 1, 0, 0, 0, 1, 1, 0, 0],
+/// An unclaimed dual-purpose pin at its bank's standard. Observed on the
+/// fuzz designs at every standard (nCEO is a row IOE).
+fn dual_purpose_settings(block: i32, d: DualPurpose, std: Standard) -> Result<Vec<Setting>> {
+    use arch::*;
+    let mut v: Vec<Setting> = vec![
+        (IO_PIN_MODE, -1, &[1, 0]),
+        (IO_SET_CE_TO_OEREG_TIE_OFF, -1, &[1]),
+        (IO_SET_CE_TO_OUTREG_TIE_OFF, -1, &[1]),
+    ];
+    match d {
+        DualPurpose::SerialFlash => {
+            v.push((IO_OE_INVERT, -1, &[1]));
+            v.push((IO_USE_PULL_UP, -1, &[1]));
+            v.push((IO_SELECT_IOST_DIRT, -1, if std.low_voltage_input() { &[0, 1, 0] } else { &[0, 0, 0] }));
+        }
+        DualPurpose::Nceo => {
+            v.push((IO_DATA_INVERT, -1, &[1]));
+            v.push((IO_USE_OUTPUT_DUTY_CYCLE, -1, &[1, 1]));
+            v.push((IO_SELECT_IOST_DIRT, -1, &[1, 1, 0]));
+            // nCEO follows the bank's VCCIO, not its standard: in a 3.3-V
+            // LVCMOS bank it still gets the LVTTL 24 mA code.
+            let std = if std == Standard::Lvcmos33 { Standard::Lvttl33 } else { std };
+            let code = drive_code(block, std, std.row_default_ma()).with_context(|| format!("nCEO drive at {std:?}"))?;
+            v.push((IO_SET_DRIVE_STRENGTH_ARMSTRONG, -1, code));
+        }
+    }
+    Ok(v)
+}
+
+/// Drive strength codes (`IO_SET_DRIVE_STRENGTH_ARMSTRONG`), observed on
+/// the fuzz designs: every current of 3.3-V LVTTL, the default current of
+/// the other standards. The code depends on the standard, not only the
+/// current. Row IOEs have 8 bits, column IOEs 10.
+fn drive_code(block: i32, std: Standard, ma: u32) -> Option<&'static [u8]> {
+    use Standard::*;
+    Some(match (block, std, ma) {
+        (BLOCK_ROW, Lvttl33, 4) => &[1, 0, 0, 0, 1, 0, 0, 0],
+        (BLOCK_ROW, Lvttl33, 8) => &[0, 1, 0, 0, 0, 1, 0, 0],
+        (BLOCK_ROW, Lvttl33, 12) => &[1, 1, 0, 0, 1, 1, 0, 0],
+        (BLOCK_ROW, Lvttl33, 16) => &[1, 0, 1, 0, 0, 0, 1, 0],
+        (BLOCK_ROW, Lvttl33, 20) => &[0, 1, 1, 0, 1, 0, 1, 0],
+        (BLOCK_ROW, Lvttl33, 24) => &[1, 1, 1, 0, 0, 1, 1, 0],
+        (BLOCK_ROW, Lvcmos33, 12) => &[1, 1, 1, 0, 1, 1, 1, 0],
+        (BLOCK_ROW, V25, 8) => &[1, 1, 0, 0, 0, 1, 1, 0],
+        (BLOCK_ROW, V18, 12) => &[1, 1, 1, 0, 1, 1, 1, 0],
+        (BLOCK_ROW, V15, 6) => &[0, 1, 1, 0, 0, 1, 1, 0],
+        (BLOCK_COL, Lvttl33, 4) => &[1, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+        (BLOCK_COL, Lvttl33, 8) => &[0, 1, 0, 0, 0, 0, 1, 0, 0, 0],
+        (BLOCK_COL, Lvttl33, 12) => &[1, 1, 0, 0, 0, 1, 1, 0, 0, 0],
+        (BLOCK_COL, Lvttl33, 16) => &[1, 0, 1, 0, 0, 0, 0, 1, 0, 0],
+        (BLOCK_COL, Lvttl33, 20) => &[0, 1, 1, 0, 0, 1, 0, 1, 0, 0],
+        (BLOCK_COL, Lvttl33, 24) => &[1, 1, 1, 0, 0, 0, 1, 1, 0, 0],
+        (BLOCK_COL, Lvcmos33, 24) => &[1, 1, 1, 1, 1, 1, 1, 0, 1, 1],
+        (BLOCK_COL, V25, 16) => &[0, 1, 1, 0, 0, 0, 0, 1, 1, 0],
+        (BLOCK_COL, V18, 12) => &[1, 1, 1, 0, 0, 1, 1, 1, 0, 0],
+        (BLOCK_COL, V15, 8) => &[0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
         _ => return None,
     })
 }
@@ -462,19 +555,27 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
         v.extend([
             (IO_SET_CE_TO_OEREG_TIE_OFF, -1, &[1][..]),
             (IO_SET_CE_TO_OUTREG_TIE_OFF, -1, &[1][..]),
-            (IO_USE_OUTPUT_DUTY_CYCLE, -1, &[1, 1][..]),
         ]);
-        match u.role {
-            Role::In => v.push((IO_OE_INVERT, -1, &[1])),
-            // An output-only pin has its input buffer switched off the
-            // same way an unused one does.
-            Role::Out => v.push((IO_SELECT_IOST_DIRT, -1, &[1, 1, 0])),
-            Role::Bidir => {}
+        if u.role == Role::In {
+            v.push((IO_OE_INVERT, -1, &[1]));
+        }
+        // Set on every used pin except outputs below 3.3 V (observed on
+        // 2.5, 1.8 and 1.5 V; the name suggests duty-cycle correction).
+        let low_v = matches!(u.standard, Standard::V25 | Standard::V18 | Standard::V15);
+        if u.role == Role::In || !low_v {
+            v.push((IO_USE_OUTPUT_DUTY_CYCLE, -1, &[1, 1]));
         }
         if u.role != Role::In {
-            // Quartus's default for 3.3-V LVTTL is 24 mA.
-            let ma = u.drive.unwrap_or(24);
-            let code = drive_code(block, ma).with_context(|| format!("{}: no drive code for {ma} mA", u.pin))?;
+            // The netlist names the current of every output; "Default" is
+            // only seen on 3.3-V LVTTL, where it is 24 mA. (Other
+            // standards' defaults differ between row and column IOEs.)
+            let ma = match (u.drive, u.standard) {
+                (Some(ma), _) => ma,
+                (None, Standard::Lvttl33) => 24,
+                (None, s) => bail!("{}: {s:?} output with no current strength", u.pin),
+            };
+            let code = drive_code(block, u.standard, ma)
+                .with_context(|| format!("{}: no drive code for {:?} at {ma} mA", u.pin, u.standard))?;
             v.push((IO_SET_DRIVE_STRENGTH_ARMSTRONG, -1, code));
             if u.data_line.is_none() {
                 match u.data_const {
@@ -522,6 +623,18 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
     } else {
         ensure!(u.role == Role::In, "{}: dedicated clock pin used as {:?}", u.pin, u.role);
     }
+    // Input buffer select: an output-only pin has it switched off the same
+    // way an unused one does; 1.8 V and 1.5 V inputs use the low-voltage
+    // buffer.
+    v.push((
+        IO_SELECT_IOST_DIRT,
+        -1,
+        match (u.role, u.standard) {
+            (Role::Out, _) => &[1, 1, 0],
+            (_, s) if s.low_voltage_input() => &[0, 1, 0],
+            _ => &[0, 0, 0],
+        },
+    ));
     if u.pull_up {
         v.push((IO_USE_PULL_UP, -1, &[1]));
     }
@@ -536,23 +649,30 @@ impl IoDb {
     /// are left out (they keep the base image).
     pub fn bits(&self, uses: &[PinUse], unused: UnusedPins) -> Result<Vec<(IoBit, bool)>> {
         let by_pin: HashMap<&str, &PinUse> = uses.iter().map(|u| (u.pin.as_str(), u)).collect();
+        // A bank's I/O standard is that of the pins the design puts in it
+        // (Quartus requires them to agree on VCCIO); empty banks are 3.3 V.
+        let mut bank_std: HashMap<i32, Standard> = HashMap::new();
+        for u in uses {
+            let b = self.pins.get(&u.pin).with_context(|| format!("{} ({}) is not a user I/O pin", u.pin, u.port))?.bank;
+            bank_std.insert(b, u.standard);
+        }
         let mut out = Vec::new();
         let mut pins: Vec<&Pin> = self.pins.values().collect();
         pins.sort_by(|a, b| a.name.cmp(&b.name));
         for p in pins {
             let u = by_pin.get(p.name.as_str());
-            if u.is_none() && p.dual_purpose {
-                continue;
-            }
             let mut val: HashMap<IoBit, bool> = HashMap::new();
             for (_, bits) in self.footprint(p.ioe) {
                 for b in bits.iter().flatten() {
                     val.insert(*b, false);
                 }
             }
-            let settings = match u {
-                None => unused_settings(p.ioe.block, unused),
-                Some(u) => used_settings(p.ioe.block, u)?,
+            let settings = match (u, p.dual_purpose) {
+                (Some(u), _) => used_settings(p.ioe.block, u)?,
+                (None, Some(d)) => {
+                    dual_purpose_settings(p.ioe.block, d, bank_std.get(&p.bank).copied().unwrap_or(Standard::Lvttl33))?
+                }
+                (None, None) => unused_settings(p.ioe.block, unused),
             };
             for (a, i, v) in settings {
                 let bits = self.feature(p.ioe, a, i)?;
@@ -574,9 +694,6 @@ impl IoDb {
                 }
             }
             out.extend(val);
-        }
-        for u in uses {
-            ensure!(self.pins.contains_key(&u.pin), "{} ({}) is not a user I/O pin", u.pin, u.port);
         }
         out.sort();
         Ok(out)
