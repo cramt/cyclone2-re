@@ -60,7 +60,7 @@ impl Design {
         let qsf = std::fs::read_to_string(dir.join("build/top.qsf")).context("back-annotated qsf")?;
         let pins = io::pin_uses(&atoms, &sigs, &qsf)?;
         let mut rep = Vec::new();
-        for (b, v) in iodb.bits(&pins)? {
+        for (b, v) in iodb.bits(&pins, io::UnusedPins::from_qsf(&qsf)?)? {
             match b {
                 IoBit::Core(b) => bits.push((b, v, Source::Io)),
                 IoBit::Rep(b) => rep.push((b, v)),

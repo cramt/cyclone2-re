@@ -380,20 +380,54 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
 /// One feature value: bits in the feature's level order.
 type Setting = (i32, i32, &'static [u8]);
 
-/// Feature values of an unused IOE (`RESERVE_ALL_UNUSED_PINS "AS INPUT
-/// TRI-STATED"`), observed on every unused IOE of the fuzz designs apart
-/// from the dual-purpose pins. Features not listed are 0.
-fn unused_settings(block: i32) -> &'static [Setting] {
-    use arch::*;
-    match block {
-        BLOCK_ROW | BLOCK_COL => &[
-            (IO_OE_INVERT, -1, &[1]),
-            (IO_PIN_MODE, -1, &[1, 0]),
-            (IO_REG_FEEDS_PIN_OUT_YGR, -1, &[1, 0]),
-            (IO_SELECT_IOST_DIRT, -1, &[1, 1, 0]),
-        ],
-        _ => &[(IO_SELECT_IOST_DIRT, -1, &[1, 1, 0])],
+/// What unused user I/O pins do (`RESERVE_ALL_UNUSED_PINS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnusedPins {
+    InputTriStated,
+    InputBusHold,
+    InputPullUp,
+    /// Also what "AS OUTPUT DRIVING AN UNSPECIFIED SIGNAL" gives: the
+    /// two came out bit-identical.
+    OutputGround,
+}
+
+impl UnusedPins {
+    /// From a qsf; absent means our oracle's setting, input tri-stated.
+    pub fn from_qsf(qsf: &str) -> Result<Self> {
+        let mut mode = UnusedPins::InputTriStated;
+        for l in qsf.lines() {
+            let Some(v) = l.trim().strip_prefix("set_global_assignment -name RESERVE_ALL_UNUSED_PINS ") else { continue };
+            mode = match v.trim().trim_matches('"') {
+                "AS INPUT TRI-STATED" => UnusedPins::InputTriStated,
+                "AS INPUT TRI-STATED WITH BUS-HOLD" => UnusedPins::InputBusHold,
+                "AS INPUT TRI-STATED WITH WEAK PULL-UP" => UnusedPins::InputPullUp,
+                "AS OUTPUT DRIVING GROUND" | "AS OUTPUT DRIVING AN UNSPECIFIED SIGNAL" => UnusedPins::OutputGround,
+                m => bail!("RESERVE_ALL_UNUSED_PINS {m:?} isn't modelled"),
+            };
+        }
+        Ok(mode)
     }
+}
+
+/// Feature values of an unused IOE, observed on every unused IOE of the
+/// fuzz designs (one design per mode) apart from the dual-purpose pins.
+/// Features not listed are 0.
+fn unused_settings(block: i32, mode: UnusedPins) -> Vec<Setting> {
+    use arch::*;
+    let mut v: Vec<Setting> = vec![(IO_SELECT_IOST_DIRT, -1, &[1, 1, 0])];
+    if matches!(block, BLOCK_ROW | BLOCK_COL) {
+        v.extend([(IO_PIN_MODE, -1, &[1u8, 0][..]), (IO_REG_FEEDS_PIN_OUT_YGR, -1, &[1, 0][..])]);
+        match mode {
+            UnusedPins::OutputGround => v.push((IO_SET_DRIVE_STRENGTH_ARMSTRONG, -1, drive_code(block, 24).unwrap())),
+            _ => v.push((IO_OE_INVERT, -1, &[1])),
+        }
+        match mode {
+            UnusedPins::InputBusHold => v.push((IO_USE_BUS_HOLD, -1, &[1])),
+            UnusedPins::InputPullUp => v.push((IO_USE_PULL_UP, -1, &[1])),
+            _ => {}
+        }
+    }
+    v
 }
 
 /// 3.3-V LVTTL drive strength codes (`IO_SET_DRIVE_STRENGTH_ARMSTRONG`),
@@ -500,7 +534,7 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
 impl IoDb {
     /// Every IOE bit, for a design using `uses`. Unused dual-purpose pins
     /// are left out (they keep the base image).
-    pub fn bits(&self, uses: &[PinUse]) -> Result<Vec<(IoBit, bool)>> {
+    pub fn bits(&self, uses: &[PinUse], unused: UnusedPins) -> Result<Vec<(IoBit, bool)>> {
         let by_pin: HashMap<&str, &PinUse> = uses.iter().map(|u| (u.pin.as_str(), u)).collect();
         let mut out = Vec::new();
         let mut pins: Vec<&Pin> = self.pins.values().collect();
@@ -517,7 +551,7 @@ impl IoDb {
                 }
             }
             let settings = match u {
-                None => unused_settings(p.ioe.block).to_vec(),
+                None => unused_settings(p.ioe.block, unused),
                 Some(u) => used_settings(p.ioe.block, u)?,
             };
             for (a, i, v) in settings {
