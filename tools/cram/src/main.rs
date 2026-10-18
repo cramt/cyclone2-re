@@ -110,13 +110,20 @@ fn check(empty: &Path, dirs: &[String]) -> Result<()> {
 }
 
 /// I/O-region bits (frames 0-23, top/bottom I/O rows) that differ from
-/// the empty design identically in every training design.
-fn shared_io_bits(base: &Rbf, dirs: &[String]) -> Result<Vec<(FrameBit, bool)>> {
+/// the empty design identically in every training design, leaving out
+/// what the model itself sets in that design (output data muxes, routing
+/// into the I/O rows), so only the pin configuration is copied.
+fn shared_io_bits(m: &Model, base: &Rbf, dirs: &[String]) -> Result<Vec<(FrameBit, bool)>> {
     let mut common: Option<HashSet<(FrameBit, bool)>> = None;
     for d in dirs {
         let rbf = Rbf::read(&Path::new(d).join("build/output_files/top.rbf"))?;
-        let s: HashSet<(FrameBit, bool)> =
-            base.diff(&rbf).into_iter().filter(|b| is_io_region(*b)).map(|b| (b, rbf.get(b))).collect();
+        let modelled: HashSet<FrameBit> = Design::load(&m.dev, &m.lab, Path::new(d))?.bits.iter().map(|b| b.0).collect();
+        let s: HashSet<(FrameBit, bool)> = base
+            .diff(&rbf)
+            .into_iter()
+            .filter(|b| is_io_region(*b) && !modelled.contains(b))
+            .map(|b| (b, rbf.get(b)))
+            .collect();
         common = Some(match common {
             None => s,
             Some(c) => c.intersection(&s).copied().collect(),
@@ -129,6 +136,12 @@ fn shared_io_bits(base: &Rbf, dirs: &[String]) -> Result<Vec<(FrameBit, bool)>> 
 
 fn is_io_region(b: FrameBit) -> bool {
     if (b.frame as usize) < rbf::FIRST_CRC_FRAME {
+        return true;
+    }
+    // Left and right I/O columns: the frames outside the outermost LAB
+    // blocks (a LAB block spans lut_frame - 22 ..= lut_frame + 12, asmdb).
+    let frame = b.frame as u32;
+    if frame < le::lut_frame(1).unwrap() - 22 || frame > le::lut_frame(64).unwrap() + 12 {
         return true;
     }
     addr::flat(b).map_or(true, |f| {
@@ -145,8 +158,12 @@ fn assemble(empty: &Path, dir: &Path, out: &Path, io_dirs: &[String]) -> Result<
     for &(b, v, _) in &des.bits {
         rbf.set(b, v);
     }
-    let io = shared_io_bits(&Rbf::read(empty)?, io_dirs)?;
+    let io = shared_io_bits(&m, &Rbf::read(empty)?, io_dirs)?;
     for &(b, v) in &io {
+        rbf.set(b, v);
+    }
+    // Model bits win over copied pin configuration.
+    for &(b, v, _) in &des.bits {
         rbf.set(b, v);
     }
     rbf.fix_crcs();
@@ -185,7 +202,7 @@ fn compare(ours: &Rbf, theirs: &Rbf) {
         let k = if (b.frame as usize) < rbf::FIRST_CRC_FRAME {
             "frames 0-23"
         } else if is_io_region(*b) {
-            "top/bottom I/O rows"
+            "I/O rows/columns"
         } else {
             "core"
         };

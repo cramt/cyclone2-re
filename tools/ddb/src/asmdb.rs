@@ -55,6 +55,7 @@ pub mod arch {
     pub const LAB_SYNC_LOAD_FAST_MUX_MAG: i32 = 74;
     pub const CLKBUF_CLK_INPUT_SELECT_CYCLONEII: i32 = 2318;
     pub const CLKBUF_ENABLE_AND_INVERT: i32 = 2320;
+    pub const CLKBUF_ENABLE_MODE: i32 = 2339;
     /// Block type of a LAB (`m_group_block_type`).
     pub const BLOCK_LAB: i32 = 18;
 }

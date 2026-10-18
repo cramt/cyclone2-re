@@ -87,9 +87,17 @@ pub enum Aclr {
     Global(u8),
 }
 
+/// A LAB control signal arriving on control line `line`, possibly
+/// inverted at the register port (the LAB has an invert bit for it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Ctl {
+    pub line: u8,
+    pub inverted: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sload {
-    Pia(u8),
+    Pia(Ctl),
     /// sload tied high: registers load sdata (= their LE's datac) every
     /// cycle, how the fitter packs a register with an unrelated LUT.
     Const,
@@ -98,24 +106,34 @@ pub enum Sload {
 /// The LAB's synchronous clear and load; a LAB has one of each.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Sync {
-    pub sclr: Option<u8>,
+    pub sclr: Option<Ctl>,
     pub sload: Option<Sload>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LabConfig {
-    /// LAB_PIA_TO_INPUT k: local line feeding LAB control line k.
-    pub pia: [Option<u8>; 4],
+    /// LAB_PIA_TO_INPUT k: what feeds LAB control line k (same source
+    /// space as an LE input: local line or an LE's own output).
+    pub pia: [Option<LeSource>; 4],
     pub clocks: [Option<GlobalClock>; 2],
     /// Clock enable of LAB clock j, as the control line carrying it.
-    pub enables: [Option<u8>; 2],
+    pub enables: [Option<Ctl>; 2],
     pub aclr: Option<Aclr>,
     pub sync: Sync,
+}
+
+/// A global clock control block in use: GCLK `g` driven from its clock
+/// input `input` (CLKBUF_IN index: 0/1 dedicated clock pins, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClkCtrl {
+    pub g: u8,
+    pub input: u8,
 }
 
 #[derive(Debug, Default)]
 pub struct Logic {
     pub les: Vec<LeConfig>,
+    pub clkctrls: Vec<ClkCtrl>,
     pub labs: BTreeMap<(u32, u32), LabConfig>,
     /// Things the design uses that this model doesn't cover yet; their bits
     /// will be missing from the output.
@@ -189,11 +207,12 @@ impl Logic {
                     }
                     "LAB_CONTROL_MUX" => {
                         let prev = s.parents[i].map(|j| &s.resources[j]);
-                        let Some(p) = prev.filter(|p| p.kind == "LOCAL_INTERCONNECT" && (p.x, p.y) == (r.x, r.y)) else {
-                            bail!("{}: LAB_CONTROL_MUX {r:?} not fed by its LAB's local interconnect", s.name)
+                        let src = match prev.filter(|p| (p.x, p.y) == (r.x, r.y)) {
+                            Some(p) if p.kind == "LOCAL_INTERCONNECT" => LeSource::Line(p.index as u8),
+                            Some(p) if p.kind == "LOCAL_LINE" => LeSource::Feedback(p.index as u8),
+                            _ => bail!("{}: LAB_CONTROL_MUX {r:?} not fed from its own LAB", s.name),
                         };
-                        let lab = labs.entry((x, y)).or_default();
-                        lab.pia[r.index as usize] = Some(p.index as u8);
+                        labs.entry((x, y)).or_default().pia[r.index as usize] = Some(src);
                     }
                     _ => {}
                 }
@@ -229,11 +248,15 @@ impl Logic {
         // line fixes its LAB clock index; the rest fill in inverted clocks
         // first, then lowest buffer (fit to the two-clock fuzz LABs: 6
         // non-inverted pairs, 1 inverted/non-inverted pair).
-        type Domain = (u8, bool, Option<u8>);
+        type Domain = (u8, bool, Option<Ctl>);
         let domain = |x: u32, y: u32, le: u32, ff: &Atom| -> Option<Domain> {
             let buf = *glob.get(&(x, y, le))?.get("CLK")?;
             let inv = ff.port("clk").is_some_and(|c| c.starts_with('!'));
-            let ena = if ff.net("ena").is_some() { ctl.get(&(x, y, le)).and_then(|k| k.get("ENA")).copied() } else { None };
+            let ena = if ff.net("ena").is_some() {
+                ctl.get(&(x, y, le)).and_then(|k| k.get("ENA")).map(|&line| Ctl { line, inverted: inverted(ff, "ena") })
+            } else {
+                None
+            };
             Some((buf, inv, ena))
         };
         let mut lab_domains: BTreeMap<(u32, u32), Vec<Domain>> = BTreeMap::new();
@@ -257,7 +280,7 @@ impl Logic {
             ensure!(v.len() <= 2, "LAB {xy:?}: {} clock domains", v.len());
             let mut slot: [Option<Domain>; 2] = [None, None];
             for d in v.iter().filter(|d| d.2.is_some()) {
-                let j = if d.2.unwrap() < 2 { 1 } else { 0 };
+                let j = if d.2.unwrap().line < 2 { 1 } else { 0 };
                 ensure!(slot[j].is_none(), "LAB {xy:?}: two enables want clock {j}");
                 slot[j] = Some(*d);
             }
@@ -300,6 +323,9 @@ impl Logic {
                 let g = glob.get(&(x, y, le));
                 let k = ctl.get(&(x, y, le));
                 let clock = domain(x, y, le, ff).and_then(|d| domain_index.get(&((x, y), d))).copied().unwrap_or(0);
+                if inverted(ff, "aclr") {
+                    out.unmodelled.push(format!("{}: inverted aclr", ff.name));
+                }
                 let aclr = if ff.net("aclr").is_some() {
                     let a = match (k.and_then(|k| k.get("ACLR")), g.and_then(|g| g.get("ACLR"))) {
                         (Some(&p), _) => Aclr::Pia(p),
@@ -313,8 +339,8 @@ impl Logic {
                 };
                 let mut sync = false;
                 if ff.net("sclr").is_some() {
-                    let p = *k.and_then(|k| k.get("SCLR")).with_context(|| format!("{}: sclr route", ff.name))?;
-                    set_once(&mut lab.sync.sclr, p, "sync clear", (x, y))?;
+                    let line = *k.and_then(|k| k.get("SCLR")).with_context(|| format!("{}: sclr route", ff.name))?;
+                    set_once(&mut lab.sync.sclr, Ctl { line, inverted: inverted(ff, "sclr") }, "sync clear", (x, y))?;
                     sync = true;
                 }
                 match ff.port("sload") {
@@ -323,8 +349,9 @@ impl Logic {
                         sync = true;
                     }
                     Some(n) if n != "gnd" => {
-                        let p = *k.and_then(|k| k.get("SLOAD")).with_context(|| format!("{}: sload route", ff.name))?;
-                        set_once(&mut lab.sync.sload, Sload::Pia(p), "sync load", (x, y))?;
+                        let line = *k.and_then(|k| k.get("SLOAD")).with_context(|| format!("{}: sload route", ff.name))?;
+                        let c = Ctl { line, inverted: inverted(ff, "sload") };
+                        set_once(&mut lab.sync.sload, Sload::Pia(c), "sync load", (x, y))?;
                         sync = true;
                     }
                     _ => {}
@@ -339,6 +366,30 @@ impl Logic {
             out.les.push(c);
         }
         out.labs = labs;
+        // Clock control: the rcf runs pin -> CLKBUF_IN (z, input) on one
+        // net and CLKBUF_OUT (z) -> GLOBAL_CLK_H (index = G) on the next;
+        // match them up by tile and z.
+        let mut ins: HashMap<(i16, i16, i16), u8> = HashMap::new();
+        let mut outs: HashMap<(i16, i16, i16), u8> = HashMap::new();
+        for s in sigs {
+            for (i, r) in s.resources.iter().enumerate() {
+                match r.kind.as_str() {
+                    "CLKBUF_IN" => {
+                        ins.insert((r.x, r.y, r.z), r.index as u8);
+                    }
+                    "GLOBAL_CLK_H" => {
+                        if let Some(p) = s.parents[i].map(|p| &s.resources[p]).filter(|p| p.kind == "CLKBUF_OUT") {
+                            outs.insert((p.x, p.y, p.z), r.index as u8);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (k, &g) in &outs {
+            let input = *ins.get(k).with_context(|| format!("clock control at {k:?} has no CLKBUF_IN"))?;
+            out.clkctrls.push(ClkCtrl { g, input });
+        }
         Ok(out)
     }
 
@@ -349,11 +400,25 @@ impl Logic {
         for c in &self.les {
             le_bits(db, c, &mut out)?;
         }
+        for c in &self.clkctrls {
+            // Unused controls read select 0b111 / enable 0 in the empty
+            // design; in use: the input index, LSB first, and enable 1
+            // (counter and fuzz designs, G2/G3/G6/G8/G10/G11/G15).
+            let sel = &db.clkctrl_select[c.g as usize];
+            for (k, &b) in sel.iter().enumerate() {
+                out.push((b as u32, c.input >> k & 1 == 1));
+            }
+            out.push((db.clkctrl_enable[c.g as usize] as u32, true));
+        }
         for (&(x, y), l) in &self.labs {
             lab_bits(db, x, y, l, &mut out).with_context(|| format!("LAB X{x} Y{y} {l:?}"))?;
         }
         Ok(out)
     }
+}
+
+fn inverted(a: &Atom, port: &str) -> bool {
+    a.port(port).is_some_and(|n| n.starts_with('!'))
 }
 
 fn set_once<T: PartialEq + std::fmt::Debug>(slot: &mut Option<T>, v: T, what: &str, lab: (u32, u32)) -> Result<()> {
@@ -411,9 +476,9 @@ fn lab_bits(db: &LabDb, x: u32, y: u32, l: &LabConfig, out: &mut Vec<(u32, bool)
         out.push((db.flat(x, y, off)?, v));
         Ok(())
     };
-    for (k, line) in l.pia.iter().enumerate() {
-        if let Some(line) = line {
-            for off in db.feature(arch::LAB_PIA_TO_INPUT, k as i32)?.source_bits(0, *line as usize)? {
+    for (k, src) in l.pia.iter().enumerate() {
+        if let Some(src) = src {
+            for off in db.feature(arch::LAB_PIA_TO_INPUT, k as i32)?.source_bits(0, src.index())? {
                 put(off, true)?;
             }
         }
@@ -431,10 +496,10 @@ fn lab_bits(db: &LabDb, x: u32, y: u32, l: &LabConfig, out: &mut Vec<(u32, bool)
         // enable and 0 when it has one (fuzz); the CE fast mux setting is
         // the control line's entry in the asmdb map.
         put(db.feature(arch::LAB_ENABLE_CE, j as i32)?.bit(0), en.is_none())?;
-        put(db.feature(arch::LAB_INVERT, 2 * j as i32 + 1)?.bit(0), en.is_none())?;
-        if let Some(p) = en {
+        put(db.feature(arch::LAB_INVERT, 2 * j as i32 + 1)?.bit(0), !en.is_some_and(|c| !c.inverted))?;
+        if let Some(c) = en {
             let f = db.feature(arch::LAB_CE_FAST_MUX, j as i32)?;
-            put(f.bit(0), encoded_setting(f, *p as usize)? == 1)?;
+            put(f.bit(0), encoded_setting(f, c.line as usize)? == 1)?;
         }
     }
     match l.aclr {
@@ -485,18 +550,19 @@ fn lab_bits(db: &LabDb, x: u32, y: u32, l: &LabConfig, out: &mut Vec<(u32, bool)
     for (i, &off) in f.paths[0][0].iter().enumerate() {
         put(off, code >> (2 - i) & 1 == 1)?;
     }
-    // LAB_INVERT 5: set with a sync clear; LAB_INVERT 4: cleared with a
-    // sync load (fuzz).
-    put(db.feature(arch::LAB_INVERT, 5)?.bit(0), sclr.is_some())?;
-    put(db.feature(arch::LAB_INVERT, 4)?.bit(0), sload.is_none())?;
+    // LAB_INVERT 5 is set by a sync clear and LAB_INVERT 4 cleared by a
+    // sync load, unless the register port inverts the signal (fuzz, and the
+    // counter's `!KEY[0]` clear): the line itself is active low.
+    put(db.feature(arch::LAB_INVERT, 5)?.bit(0), sclr.is_some_and(|c| !c.inverted))?;
+    put(db.feature(arch::LAB_INVERT, 4)?.bit(0), !sload.is_some_and(|c| !c.inverted))?;
     let _ = &l.sync;
-    if let Some(p) = sclr {
+    if let Some(c) = sclr {
         let f = db.feature(arch::LAB_SYNC_CLR_FAST_MUX, 0)?;
-        put(f.bit(0), encoded_setting(f, p as usize)? == 1)?;
+        put(f.bit(0), encoded_setting(f, c.line as usize)? == 1)?;
     }
-    if let Some(p) = sload {
+    if let Some(c) = sload {
         let f = db.feature(arch::LAB_SYNC_LOAD_FAST_MUX_MAG, 0)?;
-        put(f.bit(0), encoded_setting(f, p as usize)? == 1)?;
+        put(f.bit(0), encoded_setting(f, c.line as usize)? == 1)?;
     }
     Ok(())
 }

@@ -65,6 +65,11 @@ impl Feature {
 
 pub struct LabDb {
     features: HashMap<(i32, i32), Feature>,
+    /// Global clock control blocks, by G index: input-select bits (input
+    /// index, LSB first) and the "in use" enable bit, absolute flat
+    /// addresses (these groups have no block base).
+    pub clkctrl_select: Vec<Vec<i32>>,
+    pub clkctrl_enable: Vec<i32>,
     /// (x, y) -> base flat address of the LAB block.
     bases: HashMap<(u32, u32), u32>,
 }
@@ -90,7 +95,20 @@ impl LabDb {
             ensure!(le::lab_row(y) == row, "asmdb LAB row {row} is not a LAB row start");
             bases.insert((x, y), row * cols + col);
         }
-        Ok(LabDb { features, bases })
+        let one = |t: i32| -> Result<&ArchGroup> {
+            let v: Vec<_> = db.arch_groups.iter().filter(|g| g.arch_type == t).collect();
+            ensure!(v.len() == 1, "asmdb: {} groups of type {t}", v.len());
+            Ok(v[0])
+        };
+        let sel = one(arch::CLKBUF_CLK_INPUT_SELECT_CYCLONEII)?;
+        let clkctrl_select: Vec<Vec<i32>> =
+            sel.paths().iter().map(|p| p.first().copied().flatten().map(|m| db.mux(m).bits.clone()).unwrap_or_default()).collect();
+        let clkctrl_enable = match &one(arch::CLKBUF_ENABLE_MODE)?.body {
+            ddb::asmdb::ArchBody::Dumb { bits, .. } => bits.clone(),
+            _ => bail!("CLKBUF_ENABLE_MODE is not a plain bit list"),
+        };
+        ensure!(clkctrl_select.len() == 16 && clkctrl_enable.len() == 16, "expected 16 global clock controls");
+        Ok(LabDb { features, bases, clkctrl_select, clkctrl_enable })
     }
 
     pub fn labs(&self) -> usize {
