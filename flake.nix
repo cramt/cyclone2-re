@@ -12,8 +12,13 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        nextpnr-cyclone2 = pkgs.callPackage ./nix/nextpnr-cyclone2.nix { };
       in
       {
+        packages = {
+          inherit nextpnr-cyclone2;
+        };
+
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             cargo
@@ -24,15 +29,18 @@
 
             # the open flow this project feeds
             yosys
-            nextpnr
+            nextpnr-cyclone2
             openfpgaloader
 
             # the oracle is a 2013 binary, so tools/quartus.sh runs it in an
             # empty network namespace
             util-linux
-            # throwaway exploration scripts in tools/
+            # throwaway exploration scripts in tools/, and nextpnr's chipdb
+            # generator
             python3
           ];
+          # `just chipdb` runs the generator and bbasm this nextpnr ships.
+          NEXTPNR_CYCLONE2_SHARE = "${nextpnr-cyclone2}/share/nextpnr/cyclone2";
         };
       }
     );

@@ -699,6 +699,13 @@ impl IoDb {
         Ok(out)
     }
 
+    /// LAB-local lines (of the IOE's output tile) the output data mux can
+    /// select. Empty for blocks without one (dedicated clock inputs).
+    pub fn data_sources(&self, p: &Pin) -> Vec<u32> {
+        let Some(m) = self.muxes.get(&(p.ioe.block, arch::IO_DATA_INPUT)) else { return vec![] };
+        (0..m.sel.len() as u32).filter(|&l| m.bits(p.ioe.path, l).is_ok()).collect()
+    }
+
     /// Every bit any IOE owns (for residual accounting).
     pub fn all_bits(&self) -> impl Iterator<Item = IoBit> + '_ {
         self.features.values().flatten().flatten().flatten().copied()

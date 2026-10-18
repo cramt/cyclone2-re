@@ -1,0 +1,6 @@
+# DE2 user manual, tables 4.3 and 4.6
+set_location_assignment PIN_N2 -to CLOCK_50
+set_location_assignment PIN_AE23 -to LEDR[0]
+set_location_assignment PIN_AF23 -to LEDR[1]
+set_location_assignment PIN_AB21 -to LEDR[2]
+set_location_assignment PIN_AC22 -to LEDR[3]

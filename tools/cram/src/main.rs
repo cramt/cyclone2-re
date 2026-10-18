@@ -19,7 +19,13 @@ fn usage() -> ! {
       words recomputed.
   cram compare <ours.rbf> <quartus.rbf>    categorised bit diff
   cram roundtrip <empty.rbf> <design dir>... assemble each and compare with its RBF
-  cram verify <rbf>...                     do all check words match?"
+  cram verify <rbf>...                     do all check words match?
+  cram pack <empty.rbf> <routed.json> <out.rbf>
+      nextpnr routed design (himbaechel --write) -> RBF
+  cram quartus-export <routed.json> <dir>  the same placement and routing as Quartus input
+                                           (top.vqm, assignments.qsf, routing.rcf)
+  cram chipdb <out.txt>                    nextpnr chip database description (for
+                                           nextpnr/cyclone2/gen_chipdb.py)"
     );
     std::process::exit(2)
 }
@@ -298,6 +304,63 @@ fn main() -> Result<()> {
             }
         }
         ("lab-check", []) => lab_check()?,
+        ("pack", [empty, routed, out]) => {
+            let m = load_db()?;
+            let r = cram::nextpnr::read(&m.dev, Path::new(routed))?;
+            let des = r.to_phys(&m.dev, &m.io)?;
+            let (rbf, bits) = pack(&m, Path::new(empty), &des)?;
+            std::fs::write(out, rbf.bytes())?;
+            report(Path::new(out), &des, &bits);
+        }
+        ("quartus-export", [routed, dir]) => {
+            let m = load_db()?;
+            let r = cram::nextpnr::read(&m.dev, Path::new(routed))?;
+            let q = r.to_quartus(&m.dev, &m.io)?;
+            let dir = Path::new(dir);
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(dir.join("top.vqm"), q.vqm)?;
+            std::fs::write(dir.join("assignments.qsf"), q.qsf)?;
+            std::fs::write(dir.join("routing.rcf"), q.rcf)?;
+        }
+        // Debugging aid: the physical netlist either frontend builds, one
+        // item per line, for diffing.
+        ("dump", [kind, src]) => {
+            let m = load_db()?;
+            let des = match kind.as_str() {
+                "quartus" => quartus::load(&m.dev, Path::new(src))?.design,
+                "nextpnr" => cram::nextpnr::read(&m.dev, Path::new(src))?.to_phys(&m.dev, &m.io)?,
+                _ => usage(),
+            };
+            let mut lines = Vec::new();
+            for l in &des.logic.les {
+                lines.push(format!("{l:?}"));
+            }
+            for (xy, l) in &des.logic.labs {
+                lines.push(format!("LAB {xy:?} {l:?}"));
+            }
+            for c in &des.logic.clkctrls {
+                lines.push(format!("{c:?}"));
+            }
+            for p in &des.pins {
+                let mut p = p.clone();
+                p.port.clear();
+                lines.push(format!("{p:?}"));
+            }
+            for n in &des.nets {
+                let mut pips: Vec<String> = n.pips.iter().map(|p| format!("{}->{}", p.src().0, p.dst().0)).collect();
+                pips.sort();
+                lines.push(format!("net {}", pips.join(" ")));
+            }
+            lines.sort();
+            for l in lines {
+                println!("{l}");
+            }
+        }
+        ("chipdb", [out]) => {
+            let m = load_db()?;
+            let mut w = std::io::BufWriter::new(std::fs::File::create(out)?);
+            cram::chipdb::export(&m, &mut w)?;
+        }
         ("addr", flats) => {
             for f in flats {
                 println!("{f} {}", addr::frame_bit(f.parse()?));

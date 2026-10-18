@@ -115,6 +115,13 @@ impl LabDb {
         self.bases.len()
     }
 
+    /// (x, y) of every LAB, sorted.
+    pub fn lab_locs(&self) -> Vec<(u32, u32)> {
+        let mut v: Vec<_> = self.bases.keys().copied().collect();
+        v.sort();
+        v
+    }
+
     pub fn feature(&self, arch_type: i32, group: i32) -> Result<&Feature> {
         self.features.get(&(arch_type, group)).with_context(|| format!("asmdb LAB group {arch_type}/{group} missing"))
     }

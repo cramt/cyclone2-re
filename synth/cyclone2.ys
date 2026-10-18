@@ -1,0 +1,28 @@
+# Verilog -> Cyclone II LEs for nextpnr-himbaechel (uarch cyclone2).
+# Run after reading the design: `yosys -p "read_verilog top.v; script synth/cyclone2.ys; write_json top.json"`.
+# Paths are relative to the repo root (`just open-build` runs from there).
+
+read_verilog -lib synth/cells_sim.v
+hierarchy -check -top top
+synth -run :fine -top top
+memory_map
+opt -full
+techmap -map +/techmap.v -map synth/arith_map.v
+opt -fast
+# Registers power up 0 and have only data and clock in this model: enables
+# and resets go into the LUT in front.
+dfflegalize -cell $_DFF_P_ 0
+# What is left of init values after dfflegalize is 0, which is how the
+# registers power up anyway.
+attrmap -remove init
+techmap -map synth/cells_map.v
+opt_expr -mux_undef
+simplemap
+abc -lut 4
+opt -fast
+techmap -map synth/cells_map.v
+iopadmap -bits -inpad CY2_IBUF COMBOUT:PAD -outpad CY2_OBUF DATAOUT:PAD
+opt_clean -purge
+hierarchy -check
+stat
+check -assert

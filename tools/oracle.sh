@@ -4,7 +4,8 @@
 #
 #   tools/oracle.sh <design-dir>
 #
-# <design-dir> holds top.v (top-level module `top`) and optionally
+# <design-dir> holds top.v (top-level module `top`), or top.vqm (an atom
+# netlist, which quartus_map takes as already mapped), and optionally
 # assignments.qsf, whose lines are appended verbatim to the generated settings
 # file (location assignments, LUT pinning, ...). Output lands in
 # <design-dir>/build/output_files/top.{sof,rbf} plus the usual reports.
@@ -36,7 +37,13 @@ set_global_assignment -name FAMILY "Cyclone II"
 set_global_assignment -name DEVICE EP2C35F672C6
 set_global_assignment -name TOP_LEVEL_ENTITY top
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
-set_global_assignment -name VERILOG_FILE ../top.v
+EOF
+    if [[ -f "$design/top.vqm" ]]; then
+        echo "set_global_assignment -name VQM_FILE ../top.vqm"
+    else
+        echo "set_global_assignment -name VERILOG_FILE ../top.v"
+    fi
+    cat <<'EOF'
 set_global_assignment -name NUM_PARALLEL_PROCESSORS 1
 # Not the _NO_OUTPUT_GND spelling that back-annotation writes: 13.0sp1 ignores
 # that one and falls back to driving unused pins to ground (warning 169174).

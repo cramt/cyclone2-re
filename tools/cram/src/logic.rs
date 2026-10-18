@@ -242,14 +242,7 @@ impl Logic {
             }
         }
 
-        // LAB clocks. A register's clock domain is (row-clock buffer,
-        // inversion, enable control line). CE 1 can only come from control
-        // lines 0/1 and CE 0 from 2/3 (asmdb fast-mux maps), and an LE's
-        // clock select picks clock + enable together, so an enabled domain's
-        // line fixes its LAB clock index; the rest fill in inverted clocks
-        // first, then lowest buffer (fit to the two-clock fuzz LABs: 6
-        // non-inverted pairs, 1 inverted/non-inverted pair).
-        type Domain = (u8, bool, Option<Ctl>);
+        // LAB clocks: each register's domain, then `clock_slots`.
         let domain = |x: u32, y: u32, le: u32, ff: &Atom| -> Option<Domain> {
             let buf = *glob.get(&(x, y, le))?.get("CLK")?;
             let inv = ff.port("clk").is_some_and(|c| c.starts_with('!'));
@@ -276,19 +269,8 @@ impl Logic {
             }
         }
         let mut domain_index: HashMap<((u32, u32), Domain), u8> = HashMap::new();
-        for (&xy, v) in &mut lab_domains {
-            v.sort_by_key(|d| (!d.1, d.0, d.2));
-            ensure!(v.len() <= 2, "LAB {xy:?}: {} clock domains", v.len());
-            let mut slot: [Option<Domain>; 2] = [None, None];
-            for d in v.iter().filter(|d| d.2.is_some()) {
-                let j = if d.2.unwrap().line < 2 { 1 } else { 0 };
-                ensure!(slot[j].is_none(), "LAB {xy:?}: two enables want clock {j}");
-                slot[j] = Some(*d);
-            }
-            for d in v.iter().filter(|d| d.2.is_none()) {
-                let j = slot.iter().position(Option::is_none).unwrap();
-                slot[j] = Some(*d);
-            }
+        for (&xy, v) in &lab_domains {
+            let slot = clock_slots(v).with_context(|| format!("LAB {xy:?}"))?;
             let lab = labs.entry(xy).or_default();
             for (j, d) in slot.iter().enumerate() {
                 if let Some(d) = d {
@@ -416,6 +398,35 @@ impl Logic {
         }
         Ok(out)
     }
+}
+
+/// A register's clock domain in a LAB: (row-clock buffer, inverted, enable
+/// control line).
+pub type Domain = (u8, bool, Option<Ctl>);
+
+/// Which LAB clock (0/1) each of a LAB's clock domains takes. The bitstream
+/// doesn't record the choice, so this reproduces the fitter's: CE 1 can
+/// only come from control lines 0/1 and CE 0 from 2/3 (asmdb fast-mux
+/// maps), and an LE's clock select picks clock and enable together, so an
+/// enabled domain's line fixes its LAB clock; the rest fill in inverted
+/// clocks first, then lowest buffer (fit to the two-clock fuzz LABs: 6
+/// non-inverted pairs, 1 inverted/non-inverted pair).
+pub fn clock_slots(domains: &[Domain]) -> Result<[Option<Domain>; 2]> {
+    let mut v = domains.to_vec();
+    v.sort_by_key(|d| (!d.1, d.0, d.2));
+    v.dedup();
+    ensure!(v.len() <= 2, "{} clock domains", v.len());
+    let mut slot: [Option<Domain>; 2] = [None, None];
+    for d in v.iter().filter(|d| d.2.is_some()) {
+        let j = if d.2.unwrap().line < 2 { 1 } else { 0 };
+        ensure!(slot[j].is_none(), "two enables want clock {j}");
+        slot[j] = Some(*d);
+    }
+    for d in v.iter().filter(|d| d.2.is_none()) {
+        let j = slot.iter().position(Option::is_none).unwrap();
+        slot[j] = Some(*d);
+    }
+    Ok(slot)
 }
 
 fn inverted(a: &Atom, port: &str) -> bool {

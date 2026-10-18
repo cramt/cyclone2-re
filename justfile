@@ -54,3 +54,21 @@ io-fuzz out campaign +seeds:
 roundtrip +dirs:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
     tools/cram/target/release/cram roundtrip specimens/route/empty/build/output_files/top.rbf {{dirs}}
+
+# nextpnr chip database from your Quartus device files (build/chipdb/, never committed; ~12 min, ~3 GB RAM)
+chipdb:
+    cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
+    mkdir -p build/chipdb
+    tools/cram/target/release/cram chipdb build/chipdb/chipdb.txt
+    python3 $NEXTPNR_CYCLONE2_SHARE/gen_chipdb.py $NEXTPNR_CYCLONE2_SHARE $NEXTPNR_CYCLONE2_SHARE/constids.inc build/chipdb/chipdb.txt build/chipdb/chipdb.bba
+    bbasm --le build/chipdb/chipdb.bba build/chipdb/chipdb-EP2C35F672C6.bin
+    rm build/chipdb/chipdb.bba
+
+# Verilog -> yosys -> nextpnr -> cram pack: <dir>/build/top.rbf from <dir>/top.v and <dir>/pins.qsf, no Quartus
+open-build dir:
+    cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
+    tools/open_build.sh {{dir}}
+
+# Quartus assembles the open flow's placement and routing for <dir>; compare with our RBF
+validate dir:
+    tools/validate.sh {{dir}}

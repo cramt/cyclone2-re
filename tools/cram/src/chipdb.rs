@@ -1,0 +1,367 @@
+//! nextpnr himbaechel chip database, as a flat text description that
+//! `nextpnr/cyclone2/gen_chipdb.py` turns into a .bba with himbaechel's own
+//! generator. Generated from the user's Quartus device files at use time;
+//! never committed.
+//!
+//! Layout. Quartus tile (x, y) becomes two nextpnr tiles:
+//!
+//! - (2x, y), routing: one wire `G<node>` per routing-graph element homed
+//!   there, plus an alias `G<src>` for every foreign element that drives
+//!   one of them. Every graph edge is a pip in its destination's tile.
+//!   Those tiles are all different, so each gets its own tile type.
+//! - (2x+1, y), logic: LAB tiles share one tile type `LAB`, whose wires
+//!   alias the LAB's local lines (`LI<l>`), LE output buffers (`LEB<i>`)
+//!   and row-clock buffers (`BCB<b>`); the LE input muxes, LE output
+//!   muxes and clock selects are its pips. I/O and clock-control tiles
+//!   alias graph elements by their `G<node>` name.
+//!
+//! The names are the contract with the uarch (`nextpnr/cyclone2/*.cc`) and
+//! the nextpnr frontend (`nextpnr.rs`), which turns routed pips back into
+//! graph edges and block settings.
+
+use anyhow::{ensure, Context, Result};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::Write;
+
+use ddb::asmdb::arch;
+use ddb::routing::ROUTER_ID_BIT;
+
+use crate::io::{BLOCK_CLK_N, BLOCK_CLK_P, BLOCK_COL};
+use crate::phys::Db;
+
+pub const WIDTH: u32 = 2 * 66;
+pub const HEIGHT: u32 = 37;
+/// LE input mux sources: 38 local lines, then the 16 LEs' own outputs.
+pub const LAB_LINES: usize = 38;
+pub const LES: usize = 16;
+pub const LE_INPUTS: [&str; 4] = ["A", "B", "C", "D"];
+
+pub fn element_name(e: i16) -> String {
+    match e {
+        43 => "LOCAL_LINE",
+        45 => "LE_BUFFER",
+        264 => "R4",
+        268 => "R24",
+        269 => "C4",
+        275 => "C16",
+        276 => "LOCAL_INTERCONNECT",
+        289 => "CLK_BUFFER",
+        292 => "GLOBAL_CLK_H",
+        293 => "GLOBAL_CLK_V",
+        294 => "LAB_CLK",
+        298 => "TB_IO_CLK",
+        301 => "IO_DATAIN",
+        513 => "CLKBUF_IN",
+        515 => "CLKBUF_OUT",
+        560 => "BLK_CLK_BUF",
+        _ => return format!("E{e}"),
+    }
+    .to_string()
+}
+
+#[derive(Default)]
+struct TileType {
+    wires: BTreeMap<String, String>,
+    pips: BTreeSet<(String, String)>,
+    /// name, type, z, pins (pin, wire, is_output)
+    bels: Vec<(String, String, u32, Vec<(String, String, bool)>)>,
+}
+
+impl TileType {
+    fn wire(&mut self, name: &str, ty: &str) {
+        self.wires.entry(name.to_string()).or_insert_with(|| ty.to_string());
+    }
+    fn pip(&mut self, src: &str, dst: &str) {
+        self.pips.insert((src.to_string(), dst.to_string()));
+    }
+    fn write(&self, name: &str, w: &mut impl Write) -> Result<()> {
+        writeln!(w, "tt {name}")?;
+        for (n, t) in &self.wires {
+            writeln!(w, "w {n} {t}")?;
+        }
+        for (n, t, z, pins) in &self.bels {
+            writeln!(w, "b {n} {t} {z}")?;
+            for (p, wire, out) in pins {
+                writeln!(w, "bp {p} {wire} {}", if *out { 'O' } else { 'I' })?;
+            }
+        }
+        for (s, d) in &self.pips {
+            writeln!(w, "p {s} {d}")?;
+        }
+        writeln!(w, "end")?;
+        Ok(())
+    }
+}
+
+/// The shared LAB tile type: 16 LEs (LUT at z = 2k, register at 2k+1),
+/// their input, output and clock muxes.
+fn lab_tile(db: &Db) -> Result<TileType> {
+    let mut t = TileType::default();
+    for l in 0..LAB_LINES {
+        t.wire(&format!("LI{l}"), "LOCAL_INTERCONNECT");
+    }
+    for i in 0..2 * LES {
+        t.wire(&format!("LEB{i}"), "LE_BUFFER");
+    }
+    for b in 0..6 {
+        t.wire(&format!("BCB{b}"), "BLK_CLK_BUF");
+    }
+    for k in 0..=LES {
+        t.wire(&format!("CY{k}"), "CARRY");
+    }
+    let inputs: Vec<_> = (0..4).map(|p| db.lab.feature(arch::LE_LUT_INPUT, p)).collect::<Result<_>>()?;
+    for k in 0..LES {
+        t.wire(&format!("LL{k}"), "LOCAL_LINE");
+        for p in LE_INPUTS {
+            t.wire(&format!("LE{k}.{p}"), "LE_INPUT");
+        }
+        for o in ["COMB", "Q", "CLK"] {
+            t.wire(&format!("LE{k}.{o}"), "LE_INTERNAL");
+        }
+    }
+    for k in 0..LES {
+        let le = format!("LE{k}");
+        let mut lut = vec![("CIN".into(), format!("CY{k}"), false), ("COUT".into(), format!("CY{}", k + 1), true)];
+        lut.push(("COMBOUT".into(), format!("{le}.COMB"), true));
+        for (p, f) in LE_INPUTS.iter().zip(&inputs) {
+            lut.push((format!("DATA{p}"), format!("{le}.{p}"), false));
+            let aux = f.aux.as_ref().context("LE_LUT_INPUT is not a source mux")?;
+            ensure!(aux.len() == LAB_LINES + LES, "LE_LUT_INPUT has {} sources", aux.len());
+            for (s, &a) in aux.iter().enumerate() {
+                if a < 0 || f.source_bits(k, s).is_err() {
+                    continue;
+                }
+                let src = if s < LAB_LINES { format!("LI{s}") } else { format!("LL{}", s - LAB_LINES) };
+                t.pip(&src, &format!("{le}.{p}"));
+            }
+        }
+        t.bels.push((format!("{le}.LUT"), "LCELL_COMB".into(), 2 * k as u32, lut));
+        // The register's data input is its own LUT's output (no other path
+        // is modelled), so the two pins share a wire.
+        let ff = vec![
+            ("DATAIN".into(), format!("{le}.COMB"), false),
+            ("CLK".into(), format!("{le}.CLK"), false),
+            ("REGOUT".into(), format!("{le}.Q"), true),
+        ];
+        t.bels.push((format!("{le}.FF"), "LCELL_FF".into(), 2 * k as u32 + 1, ff));
+        // Output select (LE_REG_OUT_YGR): each of the LE's three outputs
+        // takes the LUT or the register.
+        for o in [format!("LEB{}", 2 * k), format!("LEB{}", 2 * k + 1), format!("LL{k}")] {
+            t.pip(&format!("{le}.COMB"), &o);
+            t.pip(&format!("{le}.Q"), &o);
+        }
+        // LAB clock: any row-clock buffer through the LAB clock muxes.
+        for b in 0..6 {
+            t.pip(&format!("BCB{b}"), &format!("{le}.CLK"));
+        }
+    }
+    Ok(t)
+}
+
+pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
+    let dev = &db.dev;
+    let r = &dev.routing;
+    let n = r.elements.len();
+    let tmpl = |i: usize| &r.templates[r.elements[i].template as usize];
+    let home = |i: usize| (r.elements[i].x as u32, r.elements[i].y as u32);
+    let find = |x: u32, y: u32, e: i16, z: i16, idx: i16| -> Result<usize> {
+        let v: Vec<_> = dev.at(x as i16, y as i16, z, idx).iter().filter(|&&nd| dev.element_enum(nd) == e).collect();
+        ensure!(v.len() == 1, "{} {} at X{x} Y{y} S{z} I{idx}", v.len(), element_name(e));
+        Ok(v[0].0 as usize)
+    };
+
+    // LOCAL_LINE elements have no edges; the LAB tile models them.
+    let mut fanin: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut has_edge = vec![false; n];
+    for src in 0..n {
+        if tmpl(src).element_enum == 43 {
+            continue;
+        }
+        for gid in r.fanout(src) {
+            if gid & ROUTER_ID_BIT == 0 {
+                continue;
+            }
+            let d = (gid & !ROUTER_ID_BIT) as usize;
+            if d < n {
+                fanin[d].push(src as u32);
+                has_edge[src] = true;
+                has_edge[d] = true;
+            }
+        }
+    }
+    for f in &mut fanin {
+        f.sort();
+        f.dedup();
+    }
+
+    // Routing tiles.
+    let mut members: Vec<Vec<(u32, u32, String)>> = vec![Vec::new(); n];
+    let mut rtiles: BTreeMap<(u32, u32), TileType> = BTreeMap::new();
+    for i in (0..n).filter(|&i| has_edge[i]) {
+        let (x, y) = home(i);
+        members[i].push((2 * x, y, format!("G{i}")));
+        rtiles.entry((x, y)).or_default().wire(&format!("G{i}"), &element_name(tmpl(i).element_enum));
+    }
+    for d in (0..n).filter(|&i| has_edge[i]) {
+        let (x, y) = home(d);
+        for &s in &fanin[d] {
+            let s = s as usize;
+            let t = rtiles.get_mut(&(x, y)).unwrap();
+            if home(s) != (x, y) && !t.wires.contains_key(&format!("G{s}")) {
+                t.wire(&format!("G{s}"), &element_name(tmpl(s).element_enum));
+                members[s].push((2 * x, y, format!("G{s}")));
+            }
+            t.pip(&format!("G{s}"), &format!("G{d}"));
+        }
+    }
+
+    // Logic tiles.
+    let labs = db.lab.lab_locs();
+    let lab_set: BTreeSet<(u32, u32)> = labs.iter().copied().collect();
+    for &(x, y) in &labs {
+        let mut alias = |node: usize, name: String| members[node].push((2 * x + 1, y, name));
+        for l in 0..LAB_LINES {
+            alias(find(x, y, 276, 0, l as i16)?, format!("LI{l}"));
+        }
+        for i in 0..2 * LES {
+            alias(find(x, y, 45, 0, i as i16)?, format!("LEB{i}"));
+        }
+        for b in 0..6 {
+            alias(find(x, y, 560, 0, b)?, format!("BCB{b}"));
+        }
+    }
+    let mut ltiles: BTreeMap<(u32, u32), TileType> = BTreeMap::new();
+    let alias_g = |ltiles: &mut BTreeMap<(u32, u32), TileType>, members: &mut Vec<Vec<(u32, u32, String)>>, (x, y): (u32, u32), node: usize| {
+        let name = format!("G{node}");
+        let t = ltiles.entry((x, y)).or_default();
+        if !t.wires.contains_key(&name) {
+            t.wire(&name, &element_name(tmpl(node).element_enum));
+            members[node].push((2 * x + 1, y, name.clone()));
+        }
+        name
+    };
+    let mut pads = Vec::new();
+    let mut pins: Vec<_> = db.io.pins.values().collect();
+    pins.sort_by(|a, b| a.name.cmp(&b.name));
+    for p in pins {
+        let (px, py, pz) = (p.xyz.0 as u32, p.xyz.1 as u32, p.xyz.2 as u32);
+        let clock = [BLOCK_CLK_P, BLOCK_CLK_N].contains(&p.ioe.block);
+        let z = pz + if clock { 8 } else { 0 };
+        let bel = format!("IOE{z}");
+        let (din, dout) = (format!("{bel}.COMBOUT"), format!("{bel}.DATAOUT"));
+        {
+            let t = ltiles.entry((px, py)).or_default();
+            t.wire(&din, "IOE_INTERNAL");
+            t.wire(&dout, "IOE_INTERNAL");
+            ensure!(!t.bels.iter().any(|b| b.0 == bel), "two pads at X{px} Y{py} z{z}");
+            t.bels.push((bel.clone(), "IOE".into(), z, vec![
+                ("DATAOUT".into(), dout.clone(), false),
+                ("COMBOUT".into(), din.clone(), true),
+            ]));
+        }
+        if clock {
+            let g = alias_g(&mut ltiles, &mut members, (px, py), find(px, py, 289, pz as i16, 0)?);
+            ltiles.get_mut(&(px, py)).unwrap().pip(&din, &g);
+        } else {
+            for i in 0..2 {
+                let g = alias_g(&mut ltiles, &mut members, (px, py), find(px, py, 301, pz as i16, i)?);
+                ltiles.get_mut(&(px, py)).unwrap().pip(&din, &g);
+            }
+            // Column IOEs 0 and 1 take their output from the local lines of
+            // the tile to the right (observed on every column output pin of
+            // the fuzz designs: rcf IO_DATAOUT at X+1).
+            let ox = px + u32::from(p.ioe.block == BLOCK_COL && pz < 2);
+            for l in db.io.data_sources(p) {
+                let g = alias_g(&mut ltiles, &mut members, (px, py), find(ox, py, 276, 0, l as i16)?);
+                ltiles.get_mut(&(px, py)).unwrap().pip(&g, &dout);
+            }
+        }
+        pads.push((p.name.clone(), format!("X{}Y{py}", 2 * px + 1), bel, p.bank));
+    }
+    // Global clock controls: a CLKBUF_OUT that drives GLOBAL_CLK_H G is
+    // clock control G; its input select picks a CLKBUF_IN of the same
+    // tile and z by index.
+    for o in (0..n).filter(|&i| tmpl(i).element_enum == 515) {
+        let g_nodes: Vec<usize> = r
+            .fanout(o)
+            .filter(|gid| gid & ROUTER_ID_BIT != 0)
+            .map(|gid| (gid & !ROUTER_ID_BIT) as usize)
+            .filter(|&d| d < n && tmpl(d).element_enum == 292)
+            .collect();
+        let [gn] = g_nodes[..] else { continue };
+        let g = tmpl(gn).index as u32;
+        let (x, y) = home(o);
+        let z = tmpl(o).z;
+        let out = alias_g(&mut ltiles, &mut members, (x, y), o);
+        let inclk = format!("CLKCTRL{g}.INCLK");
+        let mut srcs = Vec::new();
+        for idx in 0..8 {
+            if let Ok(i) = find(x, y, 513, z, idx) {
+                srcs.push(alias_g(&mut ltiles, &mut members, (x, y), i));
+            }
+        }
+        let t = ltiles.get_mut(&(x, y)).unwrap();
+        t.wire(&inclk, "CLKCTRL_INTERNAL");
+        for s in srcs {
+            t.pip(&s, &inclk);
+        }
+        t.bels.push((format!("CLKCTRL{g}"), "CLKCTRL".into(), 32 + g, vec![
+            ("INCLK".into(), inclk, false),
+            ("OUTCLK".into(), out, true),
+        ]));
+    }
+    for xy in ltiles.keys() {
+        ensure!(!lab_set.contains(xy), "LAB tile X{} Y{} also holds I/O or clock control", xy.0, xy.1);
+    }
+
+    // Write.
+    writeln!(w, "chip {WIDTH} {HEIGHT}")?;
+    TileType::default().write("NULL", w)?;
+    lab_tile(db)?.write("LAB", w)?;
+    for ((x, y), t) in &rtiles {
+        t.write(&format!("R{x}_{y}"), w)?;
+    }
+    for ((x, y), t) in &ltiles {
+        t.write(&format!("L{x}_{y}"), w)?;
+    }
+    for ty in 0..HEIGHT {
+        for tx in 0..WIDTH {
+            let (x, y) = (tx / 2, ty);
+            let name = if tx % 2 == 0 {
+                rtiles.contains_key(&(x, y)).then(|| format!("R{x}_{y}"))
+            } else if lab_set.contains(&(x, y)) {
+                Some("LAB".into())
+            } else {
+                ltiles.contains_key(&(x, y)).then(|| format!("L{x}_{y}"))
+            };
+            writeln!(w, "t {tx} {ty} {}", name.as_deref().unwrap_or("NULL"))?;
+        }
+    }
+    for m in members.iter().filter(|m| m.len() > 1) {
+        write!(w, "node")?;
+        for (x, y, name) in m {
+            write!(w, " {x} {y} {name}")?;
+        }
+        writeln!(w)?;
+    }
+    // Carry chains run from LE 15 of a LAB into LE 0 of the LAB below
+    // (counters: X36_Y2 N30 -> X36_Y1 N0).
+    for &(x, y) in &labs {
+        if lab_set.contains(&(x, y - 1)) {
+            writeln!(w, "node {} {y} CY{LES} {} {} CY0", 2 * x + 1, 2 * x + 1, y - 1)?;
+        }
+    }
+    writeln!(w, "pkg F672")?;
+    for (pin, tile, bel, bank) in pads {
+        writeln!(w, "pad {pin} {tile} {bel} {bank}")?;
+    }
+    let mut stats: HashMap<&str, usize> = HashMap::new();
+    stats.insert("routing tiles", rtiles.len());
+    stats.insert("routing pips", rtiles.values().map(|t| t.pips.len()).sum());
+    stats.insert("routing wires", rtiles.values().map(|t| t.wires.len()).sum());
+    stats.insert("max wires per tile", rtiles.values().chain(ltiles.values()).map(|t| t.wires.len()).max().unwrap_or(0));
+    stats.insert("LABs", labs.len());
+    stats.insert("I/O and clock tiles", ltiles.len());
+    eprintln!("chipdb: {stats:?}");
+    Ok(())
+}
