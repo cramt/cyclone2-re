@@ -78,6 +78,11 @@ Format details, with every claim marked observed or inferred, are in
   muxes, groups and block lists) and parses on all six dies. `bcm2bits`
   is unused for Cyclone II, because no `.bcm.xml` files exist for this
   family.
+- **`pad` and `pkg` decoded: package pin → pad → IOE** (`tools/ddb/src/pins.rs`,
+  `ddb pins <devinfo> magellan4 fbga672`). 672 balls, 487 with a pad.
+  Pad number, bank, I/O type and (x, y, z) match every fit report we
+  have (61,152 package-pin rows, 2,035 placed pins). Decoded values match
+  the Quartus trace.
 - Export: `cargo run --release --manifest-path tools/ddb/Cargo.toml --
   export ~/altera/13.0sp1/quartus/common/devinfo/cycloneii magellan4
   specimens/db/magellan4` writes `nodes.csv`, `edges.csv` (dst, src,
@@ -164,10 +169,13 @@ Observed on every uncompressed EP2C35 RBF so far (30 designs):
   RBFs we have (every group uniform, every check word right); `cram
   verify` recomputes all of them. So the stream holds 6 + 2701 = 2707
   frames. Flat CRAM addresses (2701 columns) never reach the 6
-  replicated frames, so they hold something outside the routing/asm bit
-  space. The earlier "8-byte runs, 96-byte period" was this replication.
-  Why the device wants these frames 4 times is open (a slower shift
-  clock for that region is a guess).
+  replicated frames. They hold the asmdb's "CFF" bits (bit value
+  `0xa0000000 | k`, 12,456 of them): IOE drive strength, pull-up, bus
+  hold, input buffer select and pin mode, the dedicated clock inputs and
+  the PLLs. The map from k to a replicated-frame bit is in [I/O
+  pins](#io-pins-phase-5). The earlier "8-byte runs, 96-byte period" was
+  this replication. Why the device wants these frames 4 times is open (a
+  slower shift clock for that region is a guess).
 - Empty design (one output pin tied to 0) against one LUT driving that pin:
   145 non-CRC bits differ, 396 counting CRC words. That is LUT plus routing
   plus input-pin config plus USERCODE.
@@ -281,13 +289,13 @@ now read from the asmdb (see [LE, LAB and clock configuration](#le-lab-and-clock
   A/B. The learned table is deleted.
 - LE output enable: the "output enable" bit at `lut_frame + 5` is
   `LE_REG_OUT_YGR`, LUT-vs-register select for the output.
-- Bottom-row output pins (still learned, I/O side): 2 bits per pin selecting the local line into
-  `IO_DATAOUT`, rows 2476-2477. Odd z mirrors even z about
-  `lut_frame(X) − 2`. Learned table (`io_mux_table.py`); lines 2, 15, 17,
-  19 and above 20 unseen.
-- Everything else seen is I/O configuration for the pin set (6 inputs,
-  6 outputs): 260 bits in frames 0-23 and 21 bits in the bottom I/O row,
-  identical in every fuzz design. Not decoded.
+- Output pins: the learned bottom-row table (2 bits per pin selecting
+  the local line into `IO_DATAOUT`) is replaced by the asmdb
+  `IO_DATA_INPUT` groups, which cover every IOE on all four sides and
+  every local line. See [I/O pins](#io-pins-phase-5).
+- Everything else that was left (260 bits in frames 0-23 and 21 in the
+  bottom I/O row for the 6/6 pin set) is pin configuration, now modelled
+  from the device DB too.
 
 **Validation** (`cram check`). Tables learned from r2, r3, r6-r15
 ("train"). Held out with the same pin set (6 in, 6 out): r16, r17, r19,
@@ -319,12 +327,13 @@ g2006 differs in 2 data bits (its output on local line 2, missing from
 the table; the two bits are where the table's line-mod-3 pattern puts
 them) plus the check words of the 2 frames.
 
-What that does and doesn't show: routing, LUT placement/contents and the
-CRAM address map are modelled from first principles plus the device DB.
-The output-pin mux is a learned lookup table. The pin I/O config and
-frames 0-23 are copied, so a design with a different pin set needs its
-own training designs. (Re-run after the asmdb LE model replaced the
-learned LE tables: same result, 16 of 17 byte-identical, g2006 as above.)
+That was the state before the I/O model: the pin configuration and frames
+0-23 were copied from training designs with the same pin set. With the
+I/O model (below) `cram assemble` takes no training designs at all, and
+all 29 of these designs (r2-r25, h1001-h1006, g2001-g2006, g2006
+included) come out byte-identical. r1, the first-generation design without
+a pinned USERCODE, differs only in its header and 6 bits of LUTs whose
+masks it can't name.
 
 ### LE, LAB and clock configuration (phase 3)
 
@@ -394,19 +403,14 @@ clock controls. What remains is I/O (frames 0-23, I/O rows and columns).
 Held out: counters (`tools/gen_counter.py`) that played no part in
 fitting the rules. They vary width (20-32), placement (free and pinned,
 chains crossing LAB rows), clock pin (N2 = CLOCK_50, D13 = CLOCK_27),
-and enable + `!KEY[0]` sync clear. `cram assemble` copies the pin I/O
-config leave-one-out from designs with the same pin set:
-
-| design | result |
-|---|---|
-| c24p, c26k, c28kp, c26e, c22e, cnt26 | byte-identical |
-| c20, c32p | 2 data bits: an LED output on a local line the learned I/O mux table hasn't seen |
-
-The 9 fuzz designs, reassembled with the I/O config copied leave-one-out
-from the other 8, have no differing bit outside I/O. Each differs in
-17-20 I/O bits: switches the fitter promoted to global clock or clear
-nets change that pin's config, so the pin set isn't really fixed. That
-is I/O-side work.
+and enable + `!KEY[0]` sync clear. With the I/O pin-set copy, c20 and
+c32p missed 2 bits (an LED output on a local line the learned I/O table
+hadn't seen), and the 9 LE fuzz designs missed 17-20 I/O bits each
+(switches the fitter promoted to a global clock or clear net). With the
+first-principles I/O model all 8 counters and all 9 LE fuzz designs are
+byte-identical, with no training designs. A promoted pin needs nothing
+special: its input drives the clock control through the `IO_DATAIN`
+path the rcf names, and that path's delay setting is what changed.
 c26e found the one rule the fuzz designs had missed: an inverted sclr
 clears `LAB_INVERT` 5. The model now tracks port inversion.
 
@@ -416,6 +420,102 @@ sharing a buffer, `LE_USE_REG_CASCADE_ARM` (never seen changing), M4K,
 multipliers and PLLs. These are flagged as `unmodelled` rather than
 guessed.
 
+### I/O pins (phase 5)
+
+Every pin's I/O element is configured from the device DB: no training
+designs and no copied bits. `tools/cram/src/io.rs`.
+
+**Where the bits are (device DB, observed):**
+
+- Package pin → pad → IOE: `ddb_magellan4fbga672_pkg` and
+  `ddb_magellan4_pad` (`ddb pins`, docs/ddb-format.md). 459 user IOEs
+  (239 row, 220 column) plus 16 dedicated clock inputs.
+- IOE → features: the asmdb groups of block types 5 (row IOE), 6
+  (column IOE) and 60/61 (clock input p/n). Path *i* is the *i*-th pad
+  of that type in pad-id order. Each IOE owns 43 (row) or 42 (column)
+  features: 64,792 core CRAM bits and 8,497 CFF bits over all IOEs.
+- CFF bits are the replicated frames 0-23. Bit *k* is in block *k* / 24
+  (one block per IOE); each run of blocks fills one bit-in-byte lane of
+  the 6 frames, 311 usable bytes per frame. Eight `(lane, first block,
+  offset)` triples, fit to the unused-pin pull-up design and the 16 clock
+  pins (table in docs/ddb-format.md), place every IOE bit of every fuzz
+  design.
+- Output data and output enable come from the LAB-local line named in
+  the rcf through the asmdb `IO_DATA_INPUT` / `IO_PIA_TO_OE` two-level
+  muxes. This replaces the learned bottom-row table and covers all four
+  sides and every line (c20, c32p and g2006 used a line the table lacked).
+- Input pins into the core: rcf `IO_DATAIN` is routing element 301 and
+  I/O row clocks `TB_IO_CLK` are 298, both plain graph edges.
+
+**What the values are (learned from fuzz designs, observed):** assembly
+writes every feature of every IOE. Features not listed are 0.
+
+| state | features set |
+|---|---|
+| unused (input tri-stated) | `PIN_MODE` 10, `REG_FEEDS_PIN_OUT` 10, `SELECT_IOST` 110, `OE_INVERT` |
+| unused, other modes | bus hold: + `USE_BUS_HOLD`; pull-up: + `USE_PULL_UP`; driving ground (= unspecified signal): drive 24 mA LVTTL, no `OE_INVERT` |
+| any used pin | `PIN_MODE` 10 (00 with an OE register), both `CE_TO_*REG_TIE_OFF`, `OUTPUT_DUTY_CYCLE` 11 (not on outputs below 3.3 V) |
+| input | `OE_INVERT`; `PAD_TO_CORE_DELAY`#*k* = 110 for each `IO_DATAIN` index *k* the rcf uses (111 if from the input register) |
+| output, bidir | drive code (table below), data mux; output only: `SELECT_IOST` 110 (input buffer off) |
+| input buffer | 1.8 / 1.5 V: `SELECT_IOST` 010; 3.3 / 2.5 V: 000 |
+| output tied to 0 / 1 | `DATA_INVERT` / nothing |
+| pull-up, bus hold | `USE_PULL_UP`, `USE_BUS_HOLD` |
+| I/O registers | `*REG_CLK_FAST_MUX` one-hot at row clock buffer + 1, `USE_CLR_*REG` = 1 (no clear), output register: `REG_FEEDS_PIN_OUT` 10 |
+| ASDO, nCSO unclaimed | input, pull-up, input buffer at the bank's VCCIO |
+| nCEO unclaimed | output, `DATA_INVERT`, bank's default drive (LVTTL code in an LVCMOS bank) |
+
+Drive codes (`IO_SET_DRIVE_STRENGTH_ARMSTRONG`) depend on the standard,
+not only the current: 3.3-V LVTTL 4-24 mA all seen; 3.3-V LVCMOS, 2.5,
+1.8 and 1.5 V only at the default current the fitter picked (row 12, 8,
+12, 6 mA; column 24, 16, 12, 8 mA). Other combinations are rejected, not
+guessed. Slew rate has no feature at all on Cyclone II.
+
+The design side comes from the post-fit netlist (`cycloneii_io`:
+location, mode, I/O standard, current, registers), the qsf (pull-up, bus
+hold, unused-pin mode) and the rcf (local lines, input paths, I/O
+clocks). A bank's standard is that of its used pins.
+
+**Fuzz designs** (`tools/gen_io.py`, `just io-fuzz`): every user pin
+independently used with probability 1/3 as input, output or bidir, wired
+pin to pin so the core holds only routing. Campaigns: `roles` (LVTTL),
+`attr` (+ random drive, pull-up, bus hold), `std` (one standard per
+bank), `reg` (I/O-cell registers on a clock pin), `unused` (each unused
+mode), `mixu` (roles + random unused mode). The rules above came from
+roles1-10, attr1-24, std1-12, reg1-5 and unused1-4.
+
+**Validation, observed** (`cram roundtrip`, which assembles from the
+model alone and compares with Quartus's RBF):
+
+| designs | what varies | byte-identical |
+|---|---|---|
+| roles1-10, attr1-24, std1-12, reg1-5, unused1-4 (rules fit here) | | 55 / 55 |
+| roles25-30, val101-112 | new random pin sets, LVTTL | 18 / 18 |
+| vala201-206 | new pin sets + random drive / pull-up / bus hold | 6 / 6 |
+| roles11-24 | pin sets of attr11-24, other attributes | 14 / 14 |
+| std13-22 | new pin sets, random standard per bank | 10 / 10 |
+| reg6-22 | new pin sets, I/O-cell registers | 17 / 17 |
+| mixu301-308 | new pin sets + random unused-pin mode | 8 / 8 |
+| de2 d1-d4 (`tools/gen_de2.py`) | the board's pins: CLOCK_50 (N2), SW[17:0], KEY[3:0], LEDR[17:0], LEDG[8:0], with LUTs and a counter | 4 / 4 |
+| counters c20-c32p, cnt26 | CLOCK_50 / CLOCK_27, LEDR, SW, KEY with logic | 8 / 8 |
+| LE fuzz l1-l9 | switches promoted to global clock / clear nets | 9 / 9 |
+| routing fuzz r2-r25, h1001-h1006, g2001-g2006 | 6/6 and 4/4 pin sets, LUT chains | 29 / 29 |
+| routing fuzz r1 | first-generation design, USERCODE not pinned | 0 / 1: header + 6 LUT bits, not I/O |
+
+178 of 179 designs come out byte-identical with no training designs
+from their pin set; the held-out ones use 472 of the 487 pads (all four
+sides: 121 left, 123 right, 114 top, 114 bottom; the other 15 are JTAG and
+configuration pins). Every check word, including the 6 replicated
+frames', is recomputed. The one miss is not an I/O residual.
+
+What is inferred rather than observed: the CFF lane boundaries inside
+unused gaps of the block numbering, and which named setting each learned
+encoded value is (pin mode codes, delay codes). Not covered, so `cram`
+refuses rather than guesses: LVDS and other differential or VREF
+standards, non-default currents outside 3.3-V LVTTL, DDIO, I/O register
+clears and clock enables, an OE register without an output register,
+programmable delays the fitter only picks under timing pressure, and
+PCI clamp (`IO_USE_PCI_DIODE_CLAMP`, never seen set).
+
 Nothing from Quartus gets redistributed. The repo ships only the derived bit
 database and our own tools.
 
@@ -424,11 +524,11 @@ database and our own tools.
 | # | Phase | Status |
 |---|-------|--------|
 | 0 | Sandboxed oracle: generated design → chipsmith → `.sof`/`.rbf`, no network | done: `tools/oracle.sh`, verified offline |
-| 1 | Container format: SOF/RBF framing, header, CRC, frame layout | RBF layout and frame CRC known for frames 24+, `cram assemble` writes valid check words; frames 0-23 (content and check scheme) and the header option words not decoded; SOF not looked at |
-| 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | LAB grid and its CRAM frame/row placement observed; M4K/multiplier/clock columns known only as frame widths |
-| 3 | Logic: LUT truth tables, FF modes, carry chains | asmdb decoded. LUT, LE inputs A-D, carry, registers, packing, LAB clocks/CE/aclr/sclr/sload placed by the asmdb, setting values fit on 9 fuzz designs. A real counter assembles byte-identical; 6 of 8 held-out counters are byte-identical, the other 2 miss only an I/O-table entry |
+| 1 | Container format: SOF/RBF framing, header, CRC, frame layout | RBF layout and every check word known: frames 24+ CRC-16, raw frames 0-23 = 6 CRC'd frames sent 4× (the CFF bits), `cram assemble` writes all of them; header option words not decoded; SOF not looked at |
+| 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | LAB grid and its CRAM frame/row placement observed; IOE coordinates and their CRAM/CFF bits from pad/pkg + asmdb; M4K/multiplier/clock columns known only as frame widths |
+| 3 | Logic: LUT truth tables, FF modes, carry chains | asmdb decoded. LUT, LE inputs A-D, carry, registers, packing, LAB clocks/CE/aclr/sclr/sload placed by the asmdb, setting values fit on 9 fuzz designs. All 8 held-out counters and all 9 LE fuzz designs byte-identical with the I/O model |
 | 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clocks (pin → clkctrl → GCLK → RCLK → LAB) modelled: graph plus asmdb clkctrl select, checked on 2 clock pins and 4 global nets |
-| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | not started |
+| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical. Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K, multipliers, PLLs not started |
 | 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | not started |
 | 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | not started |
 
