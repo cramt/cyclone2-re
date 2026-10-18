@@ -180,6 +180,25 @@ Observed on every uncompressed EP2C35 RBF so far (30 designs):
   145 non-CRC bits differ, 396 counting CRC words. That is LUT plus routing
   plus input-pin config plus USERCODE.
 
+### JTAG configuration (phase 7)
+
+An RBF is a passive-serial image and **is not what JTAG wants**. Decoding
+`quartus_cpf -c top.sof top.svf` for blinky:
+
+- `SIR 002` (PROGRAM), then one `SDR 6848464`: **54 × `ff`, RBF bytes
+  0x04c-end, 4 × `00`.** The passive-serial preamble 0x000-0x04b (`ff`
+  padding, option words, `00` + 32 × `ff`) is dropped; everything from the
+  USERCODE block on is shifted unchanged, LSB first. **[obs]**, one design;
+  `cram svf` reproduces every scan vector of Quartus' SVF.
+- `SIR 004` (CHECK_STATUS), `SDR 1449` expecting bit 562 high: CONF_DONE in
+  the boundary-scan register. **[obs]** on hardware: a load with one broken
+  frame check word reads it low.
+- `SIR 003` (STARTUP), 512 idle TCKs, `SIR 3FF` (BYPASS).
+
+openFPGALoader 1.1.1 shifts a raw `.rbf` (preamble included) and does not
+check CONF_DONE, so it reports success and the device stays unconfigured.
+Hence `just flash` goes through `cram svf`.
+
 ### LUT bits (phase 1)
 
 A WYSIWYG `cycloneii_lcell_comb` (`tools/gen_lut.py`) at `LCCOMB_X64_Y19_N0`
@@ -637,7 +656,12 @@ Quartus' fitter accepts each placement and routing (all routes preserved,
 no legality errors) and TimeQuest reports positive setup and hold slack.
 Built inside `nix develop` (the packaged nextpnr, a chip
 database from `just chipdb`), all four RBFs are identical to the validated
-ones. The open flow's bitstreams have not been on hardware yet.
+ones.
+
+**On hardware (2026-10-18):** open-built blinky, and a variant with the LED
+order flipped that Quartus never saw, run on a DE2 loaded with `just flash`
+(`cram svf` → openFPGALoader, no Altera software); CONF_DONE checked on
+every load. See [JTAG configuration](#jtag-configuration-phase-7).
 
 Gaps: no timing model in nextpnr; no M4K, multipliers or PLLs; I/O is
 3.3-V LVTTL inputs and outputs only (no bidirectional pins, output enable,
@@ -659,7 +683,7 @@ database and our own tools.
 | 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clocks (pin → clkctrl → GCLK → RCLK → LAB) modelled: graph plus asmdb clkctrl select, checked on 2 clock pins and 4 global nets |
 | 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical. Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K, multipliers, PLLs not started |
 | 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins: `just open-build`, no Quartus involved (chip database generated from the user's device files, base image from the device DB). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx and picorv32. No timing model, no M4K/multiplier/PLL, no bidirectional or registered I/O |
-| 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | not started |
+| 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | done: `cram svf` writes the JTAG stream (RBF minus its passive-serial preamble) with a CONF_DONE check; openFPGALoader plays it. Open-built designs run on a DE2. Not done: EPCS (non-volatile) programming |
 
 ## Prior art
 

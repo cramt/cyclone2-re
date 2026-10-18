@@ -8,6 +8,7 @@ pub mod logic;
 pub mod vo;
 pub mod le;
 pub mod io;
+pub mod jtag;
 pub mod rbf;
 pub mod nextpnr;
 pub mod phys;

@@ -26,6 +26,8 @@ fn usage() -> ! {
                                            (top.vqm, assignments.qsf, routing.rcf)
   cram blank <out.rbf>                     base image built from the device DB alone; any
                                            <empty.rbf> argument can be `-` for it
+  cram svf <in.rbf> <out.svf>              JTAG configuration of the RBF, CONF_DONE checked
+                                           (an RBF itself is not a JTAG stream)
   cram chipdb <out.txt>                    nextpnr chip database description (for
                                            nextpnr/cyclone2/gen_chipdb.py)"
     );
@@ -383,6 +385,7 @@ fn main() -> Result<()> {
                 }
             }
         }
+        ("svf", [rbf, out]) => std::fs::write(out, cram::jtag::svf(&Rbf::read(Path::new(rbf))?))?,
         ("blank", [out]) => {
             let m = load_db()?;
             std::fs::write(out, cram::blank::image(&m.asmdb, &m.io)?.bytes())?;

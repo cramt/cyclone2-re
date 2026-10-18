@@ -73,6 +73,10 @@ open-build dir:
 validate dir:
     tools/validate.sh {{dir}}
 
-# Load an RBF into the DE2's FPGA over its onboard USB-Blaster (volatile; gone on power cycle)
+# Load an RBF into the DE2's FPGA over its onboard USB-Blaster (volatile; gone
+# on power cycle). Goes through `cram svf`: openFPGALoader shifts a raw .rbf
+# as-is, which a Cyclone II takes without complaint and never starts up from.
 flash rbf:
-    openFPGALoader -c usb-blaster {{rbf}}
+    cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
+    tools/cram/target/release/cram svf {{rbf}} {{without_extension(rbf)}}.svf
+    openFPGALoader -c usb-blaster {{without_extension(rbf)}}.svf
