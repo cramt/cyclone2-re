@@ -50,7 +50,7 @@ struct Cyclone2Impl : HimbaechelAPI
         specific.add_options()("qsf", po::value<std::string>(),
                                "Quartus-style settings file with `set_location_assignment PIN_x -to port` lines");
         specific.add_options()("lab-inputs", po::value<int>(),
-                               "most signals from outside a LAB its LEs may use (default 26)");
+                               "most signals from outside a LAB its LEs may use (default 34)");
         return specific;
     }
 
@@ -155,69 +155,102 @@ struct Cyclone2Impl : HimbaechelAPI
     }
 
     // Constants have no driver in the fabric: LUT inputs are folded into
-    // the mask, output pins get a constant output setting, register data
-    // gets a LUT with a constant mask.
+    // the mask, output pins get a constant output setting. Registers that
+    // can never leave their power-up 0 (data, enable or clock stuck, clear
+    // stuck on) are constants too, as quartus_map treats them ("stuck at
+    // GND"), and so are LUTs left with no inputs; both propagate.
     void pack_constants()
     {
-        std::vector<IdString> trim_cells, trim_nets;
-        std::vector<std::pair<CellInfo *, bool>> const_ff;
+        std::vector<std::pair<NetInfo *, bool>> work;
         for (auto &net : ctx->nets) {
             NetInfo *ni = net.second.get();
-            if (!ni->driver.cell || !ni->driver.cell->type.in(ctx->id("GND"), ctx->id("VCC")))
+            if (ni->driver.cell && ni->driver.cell->type.in(ctx->id("GND"), ctx->id("VCC")))
+                work.emplace_back(ni, ni->driver.cell->type == ctx->id("VCC"));
+        }
+        pool<IdString> dead_cells, dead_nets;
+        std::vector<CellInfo *> const_one_ff;
+        int stuck_ffs = 0, const_luts = 0;
+        auto make_const = [&](CellInfo *c, IdString port, bool v) {
+            NetInfo *n = c->getPort(port);
+            if (n)
+                work.emplace_back(n, v);
+        };
+        while (!work.empty()) {
+            auto [ni, value] = work.back();
+            work.pop_back();
+            if (dead_nets.count(ni->name))
                 continue;
-            bool value = ni->driver.cell->type == ctx->id("VCC");
             std::vector<PortRef> users;
             for (auto &u : ni->users)
                 users.push_back(u);
             for (auto &usr : users) {
                 CellInfo *ci = usr.cell;
-                if (ci->type == id_LCELL_COMB && (usr.port.in(id_DATAA, id_DATAB, id_DATAC, id_DATAD) || usr.port == id_CIN)) {
+                if (dead_cells.count(ci->name))
+                    continue;
+                IdString p = usr.port;
+                if (ci->type == id_LCELL_COMB && (p.in(id_DATAA, id_DATAB, id_DATAC, id_DATAD) || p == id_CIN)) {
                     // CIN only acts as LUT input C (and the carry LUT's C);
                     // folding it makes both independent of the hardware cin.
-                    int bit = usr.port == id_CIN ? 2
-                                                 : (usr.port == id_DATAA ? 0 : usr.port == id_DATAB ? 1 : usr.port == id_DATAC ? 2 : 3);
+                    int bit = p == id_CIN ? 2 : lut_input_index(p);
                     uint64_t mask = ci->params.at(id_LUT_MASK).as_int64();
-                    uint64_t out = 0;
-                    for (int idx = 0; idx < 16; idx++) {
-                        int src = value ? (idx | (1 << bit)) : (idx & ~(1 << bit));
-                        out |= ((mask >> src) & 1) << idx;
+                    ci->setParam(id_LUT_MASK, Property(substitute(mask, bit, -1, value), 16));
+                    ci->disconnectPort(p);
+                    bool any = ci->getPort(id_CIN);
+                    for (auto q : lut_inputs)
+                        any |= ci->getPort(q) != nullptr;
+                    if (!any) {
+                        // Every entry is now the same: the LUT is a constant.
+                        bool v = ci->params.at(id_LUT_MASK).as_int64() & 1;
+                        make_const(ci, id_COMBOUT, v);
+                        make_const(ci, id_COUT, v);
+                        dead_cells.insert(ci->name);
+                        const_luts++;
                     }
-                    ci->setParam(id_LUT_MASK, Property(out, 16));
-                    ci->disconnectPort(usr.port);
-                } else if (ci->type == id_CY2_OBUF && usr.port == id_DATAOUT) {
+                } else if (ci->type == id_CY2_OBUF && p == id_DATAOUT) {
                     ci->setParam(id_OUT_CONST, Property(value ? 1 : 0, 1));
-                    ci->disconnectPort(usr.port);
-                } else if (ci->type == id_LCELL_FF && ((usr.port == id_ENA && value) ||
-                                                        (usr.port.in(id_ACLR, id_SCLR) && !value))) {
-                    ci->disconnectPort(usr.port); // the idle level
-                } else if (ci->type == id_LCELL_FF && usr.port == id_ENA) {
-                    // Never enabled: it holds its power-up 0 forever, which
-                    // a register loading 0 every cycle does too.
-                    ci->disconnectPort(id_ENA);
-                    ci->disconnectPort(id_DATAIN);
-                    const_ff.emplace_back(ci, false);
-                } else if (ci->type == id_LCELL_FF && usr.port == id_DATAIN) {
-                    ci->disconnectPort(usr.port);
-                    const_ff.emplace_back(ci, value);
+                    ci->disconnectPort(p);
+                } else if (ci->type == id_LCELL_FF && ((p == id_ENA && value) || (p.in(id_ACLR, id_SCLR) && !value))) {
+                    ci->disconnectPort(p); // the idle level
+                } else if (ci->type == id_LCELL_FF && usr.port == id_DATAIN && value) {
+                    ci->disconnectPort(p);
+                    const_one_ff.push_back(ci);
+                } else if (ci->type == id_LCELL_FF) {
+                    // Data 0, never enabled, never clocked or always
+                    // cleared: it stays at its power-up 0.
+                    make_const(ci, id_REGOUT, false);
+                    dead_cells.insert(ci->name);
+                    stuck_ffs++;
                 } else {
-                    log_error("constant %d on %s.%s is not supported\n", value, ctx->nameOf(ci), ctx->nameOf(usr.port));
+                    log_error("constant %d on %s.%s is not supported\n", value, ctx->nameOf(ci), ctx->nameOf(p));
                 }
             }
-            trim_cells.push_back(ni->driver.cell->name);
-            trim_nets.push_back(ni->name);
+            dead_nets.insert(ni->name);
+            if (ni->driver.cell && ni->driver.cell->type.in(ctx->id("GND"), ctx->id("VCC")))
+                dead_cells.insert(ni->driver.cell->name);
         }
-        for (IdString c : trim_cells)
+        for (IdString c : dead_cells) {
+            CellInfo *ci = ctx->cells.at(c).get();
+            std::vector<IdString> ports;
+            for (auto &port : ci->ports)
+                ports.push_back(port.first);
+            for (IdString port : ports)
+                ci->disconnectPort(port);
             ctx->cells.erase(c);
-        for (IdString n : trim_nets)
-            ctx->nets.erase(n);
-        for (auto &cf : const_ff) {
-            CellInfo *lut = ctx->createCell(ctx->idf("%s$const", ctx->nameOf(cf.first)), id_LCELL_COMB);
-            add_lut_ports(lut);
-            lut->setParam(id_LUT_MASK, Property(cf.second ? 0xFFFF : 0x0000, 16));
-            NetInfo *n = ctx->createNet(ctx->idf("%s$const_net", ctx->nameOf(cf.first)));
-            lut->connectPort(id_COMBOUT, n);
-            cf.first->connectPort(id_DATAIN, n);
         }
+        for (IdString n : dead_nets)
+            if (ctx->nets.count(n) && ctx->nets.at(n)->users.empty())
+                ctx->nets.erase(n);
+        for (CellInfo *ff : const_one_ff) {
+            if (dead_cells.count(ff->name))
+                continue;
+            CellInfo *lut = ctx->createCell(ctx->idf("%s$const", ctx->nameOf(ff)), id_LCELL_COMB);
+            add_lut_ports(lut);
+            lut->setParam(id_LUT_MASK, Property(0xFFFF, 16));
+            NetInfo *n = ctx->createNet(ctx->idf("%s$const_net", ctx->nameOf(ff)));
+            lut->connectPort(id_COMBOUT, n);
+            ff->connectPort(id_DATAIN, n);
+        }
+        log_info("Constants: %d stuck registers and %d input-less LUTs removed.\n", stuck_ffs, const_luts);
     }
 
     // quartus_map drops every one-input LUT (buffer or inverter) of an atom
@@ -637,7 +670,10 @@ struct Cyclone2Impl : HimbaechelAPI
         return true;
     }
 
-    int max_lab_inputs = 26;
+    // Measured on picorv32: 30 leaves 32-bit adders (two operands per LE)
+    // unplaceable, 34 routes in ~80 router2 iterations, 38 in ~280, no
+    // limit doesn't converge in 15 minutes.
+    int max_lab_inputs = 34;
 
     bool lab_inputs_fit(int x, int y) const
     {

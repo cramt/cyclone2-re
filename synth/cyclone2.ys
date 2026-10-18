@@ -9,12 +9,15 @@ memory_map
 opt -full
 techmap -map +/techmap.v -map synth/arith_map.v
 opt -fast
-# Registers power up 0. Enable, asynchronous clear and synchronous clear
-# (gated by the enable) are LAB-wide signals; one of each per LAB (the
-# placer enforces it), the rest goes into the LUT in front.
+# Registers power up 0: make that explicit so registers that never leave
+# it become constants. (Some only show up as stuck after LUT mapping; the
+# nextpnr packer propagates those.)
+setundef -zero -init
+opt -full -sat
+# Enable, asynchronous clear and synchronous clear (gated by the enable)
+# are LAB-wide signals; one of each per LAB (the placer enforces it), the
+# rest goes into the LUT in front.
 dfflegalize -cell $_DFF_P_ 0 -cell $_DFFE_PP_ 0 -cell $_DFF_PP0_ 0 -cell $_DFFE_PP0P_ 0 -cell $_SDFF_PP0_ 0 -cell $_SDFFCE_PP0P_ 0
-# What is left of init values after dfflegalize is 0, which is how the
-# registers power up anyway.
 attrmap -remove init
 techmap -map synth/cells_map.v
 opt_expr -mux_undef
