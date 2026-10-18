@@ -55,7 +55,7 @@ roundtrip +dirs:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
     tools/cram/target/release/cram roundtrip - {{dirs}}
 
-# nextpnr chip database from your Quartus device files (build/chipdb/, never committed; ~12 min, ~3 GB RAM)
+# nextpnr chip database from your Quartus device files (build/chipdb/, never committed; ~10 min, 2.6 GB RAM)
 chipdb:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
     mkdir -p build/chipdb

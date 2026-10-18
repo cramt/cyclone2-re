@@ -516,6 +516,135 @@ clears and clock enables, an OE register without an output register,
 programmable delays the fitter only picks under timing pressure, and
 PCI clamp (`IO_USE_PCI_DIODE_CLAMP`, never seen set).
 
+### Open flow (phase 6)
+
+Verilog → yosys → nextpnr → `cram pack` → `top.rbf`, with no Quartus
+program and no Quartus output involved:
+
+```
+nix develop
+just chipdb                       # once (~10 min): nextpnr chip database from your Quartus device files
+just open-build examples/blinky   # examples/blinky/build/top.rbf
+```
+
+A design dir holds `*.v` (top module `top`) and optionally `pins.qsf`
+(`set_location_assignment PIN_x -to port` lines; default
+`examples/de2.qsf`, the DE2's clocks, switches, keys, LEDs and UART).
+`just validate <dir>` then has the oracle assemble the same placement and
+routing and compares (below).
+
+**Physical netlist** (`tools/cram/src/phys.rs`). What a placed and routed
+design configures in device terms: LE configs (LUT mask over physical
+inputs, input sources, carry, register and its LAB clock slot), LAB-wide
+settings, clock controls, every used pin's IOE settings, and routed nets as
+routing-graph edges. A `Pip` can only be built from two nodes the graph
+connects. `bits()` turns it into CRAM. Two frontends build it:
+`quartus.rs` (post-fit netlist + rcf + qsf, what `cram assemble` and
+`roundtrip` use; still 178/179 byte-identical) and `nextpnr.rs` (routed
+himbaechel JSON, `cram pack`).
+
+**Base image without Quartus** (`cram blank`, `tools/cram/src/blank.rs`).
+`cram assemble` used to start from Quartus' empty-design RBF. The base is
+now built from the container layout, the asmdb's 928 default bits, the IOE
+model with every pin unused, and the values unused blocks hold, named by
+asmdb feature: per LE `LE_CLOCK_SELECT` and `LE_USE_REG_CASCADE_ARM`, per
+LAB 11 bits (no clock enables, sync code 101, idle fast muxes, `LAB_INVERT`
+1/3/4), 25 M4K bits, 17 bits of PLL 2 and 3, clock-control select 111 and
+`CLKBUF_ENABLE_AND_INVERT`, plus one bit per LAB (frame `lut_frame + 2`, LAB
+row 36) and per LAB row of the clock column (frame 1663) that no asmdb
+feature names. These values were read off Quartus' empty design by
+attributing each set bit to its asmdb owner
+(`tools/cram/examples/blank_probe.rs`) **[obs]**. Check: all 179 fuzz
+designs assembled on this base instead of Quartus' are byte-identical
+except r1, as before (`just roundtrip`). The header's 41-byte USERCODE block
+has a fixed bits-0/1 pattern whose meaning is unknown; it is the same in
+all 190 pinned-USERCODE RBFs.
+
+**Chip database** (`tools/cram/src/chipdb.rs` → `nextpnr/cyclone2/gen_chipdb.py`
+→ bbasm). Generated at use time from `devinfo/cycloneii`; `build/chipdb/`
+is not in git. Each Quartus tile (x, y) is two nextpnr tiles: (2x, y) holds
+the routing graph (one wire `G<node>` per element, an alias for every
+foreign element that drives one, one pip per graph edge in its
+destination's tile: 2,440 tile types, 2.29 M wires, 3,104,196 pips), and
+(2x+1, y) the logic. All 2,076 LABs share one tile type: 16 LUT bels (z
+2k) and register bels (z 2k+1), the LE input muxes from the asmdb
+`LE_LUT_INPUT` source maps, 16 permutation pips per LE (any physical input
+to any LUT input; carry LEs keep theirs), output select, LAB clock, the
+four control lines (`LAB_PIA_TO_INPUT`) and which register controls each
+reaches (CE/clear/sync-clear fast-mux maps), carry wires joined LE 15 →
+LE 0 of the LAB below. I/O tiles get IOE bels (data from the IOE's
+`IO_DATA_INPUT` lines, pad-to-core onto both `IO_DATA_IN` paths or the
+clock pin's `CLK_BUFFER`), and 16 clock-control bels sit at their
+`CLKBUF_OUT`. Measured: `just chipdb` takes 9.5 minutes and 2.6 GB peak
+(`cram chipdb` 27 s, the rest himbaechel's python generator and bbasm);
+the binary is 242 MB, and nextpnr-himbaechel needs about 330 MB for a
+small design.
+
+**nextpnr uarch** (`nextpnr/cyclone2/cyclone2.cc`, packaged by
+`nix/nextpnr-cyclone2.nix` against nixpkgs' nextpnr 0.11.1 source; the
+devshell's `nextpnr-himbaechel`). Cells come from `synth/cyclone2.ys`:
+`LCELL_COMB` (LUT4 + carry), `LCELL_FF` (data, clock, enable, async clear,
+sync clear gated by the enable), pin buffers; the packer adds clock
+controls. Rules it enforces, each a Quartus-legal LAB: at most two
+clock/enable pairs and one enable, one async clear, one sync clear per LAB;
+registers on the sync-load path and sync-cleared ones don't mix; a register
+sits beside the LUT that drives it, or takes its data on SDATA (input C)
+with the LAB's sload tied high; at most 34 signals from outside a LAB.
+That last number is measured on picorv32: 30 leaves 32-bit adders
+unplaceable, 34 routes in about 80 router2 iterations, 38 in 280, no limit
+had not converged after 15 minutes. Timing: none (no delay model yet), so
+placement and routing are not timing-driven.
+
+**What Quartus does to an atom netlist, and so what the flow does too**
+(observed by feeding our netlists back through the oracle):
+
+- Carry chains are rewritten with the carry inverted after every odd chain
+  position, the unused carry half of the last LE holds a copy of the sum,
+  and an unused sum half is zeros. The packer emits that form.
+- Every one-input LUT is a "redundant logic cell" and is deleted
+  (`REMOVE_REDUNDANT_*` assignments don't stop it): buffers vanish,
+  inverters fold into the loads (LUT masks, the IOE's `IO_DATA_INVERT`,
+  the LAB's enable/sync-clear inversion). The packer folds them first. An
+  inverter in front of a register is pushed back into the driving LUT, or
+  becomes an inverted copy of it; a register fed by a register gets the
+  sync-load path. Inverting register-to-register feeds (what a register
+  init of 1 turns into) are still re-placed by Quartus.
+- Registers that can't leave their power-up 0 are "stuck at GND" and
+  removed with everything they make constant. yosys (`opt -sat` with
+  explicit zero inits) and the packer (constant propagation through
+  registers) remove the same ones (32 in picorv32).
+- With a timing constraint the fitter chooses pad-to-core delays per
+  destination; the export pins them at 6 (`PAD_TO_CORE_DELAY`, the model's
+  110 code).
+- A clock control with a tied-on `ena` clears `CLKBUF_ENABLE_AND_INVERT`.
+
+**Validation** (`just validate <dir>`, `tools/validate.sh`). `cram
+quartus-export` writes the routed design as an atom netlist (`top.vqm`,
+which quartus_map takes as already mapped; atoms named after their output
+net, which is what the rcf calls them), location assignments for every LE,
+pin and clock control, and the routing as an rcf with physical
+`route_port`s. The oracle compiles that offline; `ROUTING_BACK_ANNOTATION`
+makes the fitter keep the routes. Results, observed:
+
+| design | LEs | nets | open build | Quartus routes kept | RBF vs Quartus | setup slack @ 50 MHz (Quartus STA) |
+|---|---|---|---|---|---|---|
+| blinky (26-bit counter, CLOCK_50 → LEDR[3:0]) | 26 | 85 | 20 s | 100 % | byte-identical | 16.6 ns |
+| lfsr (32-bit, seed from SW, KEY[0] load) | 81 | 219 | 15 s | 100 % | byte-identical | 8.6 ns |
+| uart_tx (115200 8N1 on UART_TXD) | 69 | 217 | 19 s | 100 % | byte-identical | 13.6 ns |
+| picorv32 (RV32I core + ROM, LEDs) | 1,039 | 1,687 | 115 s | 100 % | byte-identical | 0.43 ns |
+
+Quartus' fitter accepts each placement and routing (all routes preserved,
+no legality errors) and TimeQuest reports positive setup and hold slack.
+Built inside `nix develop` (the packaged nextpnr, a chip
+database from `just chipdb`), all four RBFs are identical to the validated
+ones. The open flow's bitstreams have not been on hardware yet.
+
+Gaps: no timing model in nextpnr; no M4K, multipliers or PLLs; I/O is
+3.3-V LVTTL inputs and outputs only (no bidirectional pins, output enable,
+I/O registers or other standards); clocks must come straight from a pin
+(no logic-driven or inverted clocks); no inverted async clear; registers
+power up 0 (an init of 1 costs inverters).
+
 Nothing from Quartus gets redistributed. The repo ships only the derived bit
 database and our own tools.
 
@@ -529,7 +658,7 @@ database and our own tools.
 | 3 | Logic: LUT truth tables, FF modes, carry chains | asmdb decoded. LUT, LE inputs A-D, carry, registers, packing, LAB clocks/CE/aclr/sclr/sload placed by the asmdb, setting values fit on 9 fuzz designs. All 8 held-out counters and all 9 LE fuzz designs byte-identical with the I/O model |
 | 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clocks (pin → clkctrl → GCLK → RCLK → LAB) modelled: graph plus asmdb clkctrl select, checked on 2 clock pins and 4 global nets |
 | 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical. Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K, multipliers, PLLs not started |
-| 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | not started |
+| 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins: `just open-build`, no Quartus involved (chip database generated from the user's device files, base image from the device DB). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx and picorv32. No timing model, no M4K/multiplier/PLL, no bidirectional or registered I/O |
 | 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | not started |
 
 ## Prior art
