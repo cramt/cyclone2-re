@@ -460,7 +460,7 @@ writes every feature of every IOE. Features not listed are 0.
 | input buffer | 1.8 / 1.5 V: `SELECT_IOST` 010; 3.3 / 2.5 V: 000 |
 | output tied to 0 / 1 | `DATA_INVERT` / nothing |
 | pull-up, bus hold | `USE_PULL_UP`, `USE_BUS_HOLD` |
-| I/O registers | `*REG_CLK_FAST_MUX` one-hot at row clock buffer + 1, `USE_CLR_*REG` = 1 (no clear), output register: `REG_FEEDS_PIN_OUT` 10 |
+| I/O registers | `*REG_CLK_FAST_MUX` one-hot at row clock buffer + 1 (only buffers 4 and 5 seen, the rest inferred), `USE_CLR_*REG` = 1 (no clear), output register: `REG_FEEDS_PIN_OUT` 10 |
 | ASDO, nCSO unclaimed | input, pull-up, input buffer at the bank's VCCIO |
 | nCEO unclaimed | output, `DATA_INVERT`, bank's default drive (LVTTL code in an LVCMOS bank) |
 
