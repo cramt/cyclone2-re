@@ -14,8 +14,8 @@ use std::path::Path;
 use ddb::device::{Device, Node};
 
 use crate::chipdb::element_name;
-use crate::io::{IoDb, PinUse, Role, Standard, UnusedPins, BLOCK_CLK_N, BLOCK_CLK_P, BLOCK_COL};
-use crate::logic::{clock_slots, ClkCtrl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic, Lut, Reg};
+use crate::io::{IoDb, OutData, PinUse, Role, Standard, UnusedPins, BLOCK_CLK_N, BLOCK_CLK_P, BLOCK_COL};
+use crate::logic::{clock_slots, Aclr, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic, Lut, Reg, Sload};
 use crate::phys::{PhysDesign, Pip, RoutedNet};
 
 /// A nextpnr wire, by what it is in the device.
@@ -31,14 +31,22 @@ enum Wire {
     /// bel z.
     Ioe { x: u32, y: u32, z: u32, pin: IoePin },
     ClkIn { g: u32 },
+    /// LAB control line k (rcf LAB_CONTROL_MUX).
+    Ctrl { x: u32, y: u32, k: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum LePin {
+    /// Physical LE input A..D (fed by the LAB's lines).
     Input(usize),
+    /// Logical LUT input DATAA..DATAD (a cell pin), fed by any physical one.
+    Logical(usize),
     Comb,
     Q,
     Clk,
+    Ena,
+    Aclr,
+    Sclr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -118,9 +126,16 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
     if let Some(k) = num(name, "LL") {
         return Ok(Wire::LocalLine { x, y, k });
     }
+    if let Some(k) = num(name, "CTRL") {
+        return Ok(Wire::Ctrl { x, y, k });
+    }
     if let Some((bel, pin)) = name.split_once('.') {
         if let Some(k) = num(bel, "LE") {
             let pin = match pin {
+                "IA" => LePin::Logical(0),
+                "IB" => LePin::Logical(1),
+                "IC" => LePin::Logical(2),
+                "ID" => LePin::Logical(3),
                 "A" => LePin::Input(0),
                 "B" => LePin::Input(1),
                 "C" => LePin::Input(2),
@@ -128,6 +143,9 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
                 "COMB" => LePin::Comb,
                 "Q" => LePin::Q,
                 "CLK" => LePin::Clk,
+                "ENA" => LePin::Ena,
+                "ACLR" => LePin::Aclr,
+                "SCLR" => LePin::Sclr,
                 _ => bail!("wire {name}"),
             };
             return Ok(Wire::Le { x, y, k, pin });
@@ -213,6 +231,38 @@ pub fn read(dev: &Device, path: &Path) -> Result<Routed> {
     Ok(Routed { cells, nets })
 }
 
+/// Logical -> physical LUT input of each LE (from the permutation pips).
+type Perm = HashMap<(u32, u32, u32), [Option<usize>; 4]>;
+
+fn perms(nets: &BTreeMap<u64, Net>) -> Perm {
+    let mut out: Perm = HashMap::new();
+    for p in nets.values().flat_map(|n| &n.pips) {
+        if let (Wire::Le { pin: LePin::Input(ph), .. }, Wire::Le { x, y, k, pin: LePin::Logical(lg) }) = (p.src, p.dst) {
+            out.entry((x, y, k)).or_default()[lg] = Some(ph);
+        }
+    }
+    out
+}
+
+/// The truth table over physical inputs. Unrouted logical inputs keep their
+/// own position: the mask doesn't depend on them, except in carry LEs,
+/// where C is the carry in and D picks sum or carry and both stay put.
+fn physical_mask(logical: u16, perm: [Option<usize>; 4]) -> u16 {
+    let mut out = 0u16;
+    for idx_p in 0..16 {
+        let mut idx_l = 0;
+        for q in 0..4 {
+            idx_l |= (idx_p >> perm[q].unwrap_or(q) & 1) << q;
+        }
+        out |= (logical >> idx_l & 1) << idx_p;
+    }
+    out
+}
+
+fn flag(c: &Cell, p: &str) -> bool {
+    c.params.get(p).is_some_and(|v| v.contains('1'))
+}
+
 fn lut_mask(c: &Cell) -> Result<u16> {
     let s = c.params.get("LUT_MASK").context("LUT_MASK")?;
     Ok(u16::from_str_radix(s, 2)?)
@@ -248,6 +298,10 @@ impl Routed {
     pub fn to_phys(&self, dev: &Device, io: &IoDb) -> Result<PhysDesign> {
         let mut les: BTreeMap<(u32, u32, u32), LeConfig> = BTreeMap::new();
         let mut clk_buf: HashMap<(u32, u32, u32), u8> = HashMap::new();
+        let mut ena: HashMap<(u32, u32, u32), u8> = HashMap::new();
+        let mut aclr: HashMap<(u32, u32, u32), Aclr> = HashMap::new();
+        let mut sclr: HashMap<(u32, u32, u32), u8> = HashMap::new();
+        let mut pia: HashMap<(u32, u32, u32), LeSource> = HashMap::new();
         let mut clk_in: HashMap<u32, u8> = HashMap::new();
         let mut data_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut datain: HashMap<(u32, u32, u32), [bool; 2]> = HashMap::new();
@@ -259,7 +313,8 @@ impl Routed {
                     (Wire::Node(s), Wire::Node(d)) => {
                         pips.push(Pip::new(dev, s, d).with_context(|| format!("{}: no edge {s:?} -> {d:?}", n.name))?)
                     }
-                    (src, Wire::Le { x, y, k, pin: LePin::Input(i) }) => {
+                    (Wire::Le { pin: LePin::Input(_), .. }, Wire::Le { pin: LePin::Logical(_), .. }) => {}
+                    (src, dst @ (Wire::Le { pin: LePin::Input(_), .. } | Wire::Ctrl { .. })) => {
                         let s = match src {
                             Wire::Node(s) => {
                                 let t = &dev.routing.templates[dev.routing.elements[s.0 as usize].template as usize];
@@ -269,7 +324,26 @@ impl Routed {
                             Wire::LocalLine { k: j, .. } => LeSource::Feedback(j as u8),
                             w => bail!("{}: LE input from {w:?}", n.name),
                         };
-                        le_at(&mut les, x, y, k).inputs[i] = Some(s);
+                        match dst {
+                            Wire::Le { x, y, k, pin: LePin::Input(i) } => le_at(&mut les, x, y, k).inputs[i] = Some(s),
+                            Wire::Ctrl { x, y, k } => {
+                                pia.insert((x, y, k), s);
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    (Wire::Ctrl { k: line, .. }, Wire::Le { x, y, k, pin }) => {
+                        let line = line as u8;
+                        match pin {
+                            LePin::Ena => ena.insert((x, y, k), line),
+                            LePin::Sclr => sclr.insert((x, y, k), line),
+                            LePin::Aclr => aclr.insert((x, y, k), Aclr::Pia(line)).map(|_| 0),
+                            p => bail!("{}: control line into LE pin {p:?}", n.name),
+                        };
+                    }
+                    (Wire::Node(s), Wire::Le { x, y, k, pin: LePin::Aclr }) => {
+                        let t = &dev.routing.templates[dev.routing.elements[s.0 as usize].template as usize];
+                        aclr.insert((x, y, k), Aclr::Global(t.index as u8));
                     }
                     (Wire::Le { x, y, k, pin }, dst) if matches!(pin, LePin::Comb | LePin::Q) => {
                         let o = match dst {
@@ -307,19 +381,37 @@ impl Routed {
             nets.push(RoutedNet { name: n.name.clone(), pips });
         }
 
+        let perm = perms(&self.nets);
         let mut clkctrls = Vec::new();
         let mut pins = Vec::new();
         let mut ff_domain: HashMap<(u32, u32, u32), Domain> = HashMap::new();
+        let sdata: std::collections::HashSet<(u32, u32, u32)> = self
+            .cells
+            .values()
+            .filter_map(|c| match c.bel {
+                Bel::Ff { x, y, k } if c.conns.contains_key("SDATA") => Some((x, y, k)),
+                _ => None,
+            })
+            .collect();
+        let sclr_inv: std::collections::HashSet<(u32, u32, u32)> = self
+            .cells
+            .values()
+            .filter_map(|c| match c.bel {
+                Bel::Ff { x, y, k } if flag(c, "SCLR_INV") => Some((x, y, k)),
+                _ => None,
+            })
+            .collect();
         for (name, c) in &self.cells {
             match (c.ty.as_str(), c.bel) {
                 ("LCELL_COMB", Bel::Lut { x, y, k }) => {
                     let l = le_at(&mut les, x, y, k);
-                    l.lut = Some(Lut { mask: lut_mask(c)? });
+                    l.lut = Some(Lut { mask: physical_mask(lut_mask(c)?, perm.get(&(x, y, k)).copied().unwrap_or_default()) });
                     l.carry_in = c.conns.contains_key("CIN");
                 }
                 ("LCELL_FF", Bel::Ff { x, y, k }) => {
                     let b = *clk_buf.get(&(x, y, k)).with_context(|| format!("{name}: clock not routed"))?;
-                    ff_domain.insert((x, y, k), (b, false, None));
+                    let e = ena.get(&(x, y, k)).map(|&line| Ctl { line, inverted: flag(c, "ENA_INV") });
+                    ff_domain.insert((x, y, k), (b, false, e));
                 }
                 ("CLKCTRL", Bel::ClkCtrl { g }) => {
                     let input = *clk_in.get(&g).with_context(|| format!("{name}: input not routed"))?;
@@ -336,8 +428,11 @@ impl Routed {
                         drive: None,
                         pull_up: false,
                         bus_hold: false,
-                        data_line: data_line.get(&(x, y, z)).copied(),
-                        data_const: c.params.get("OUT_CONST").map(|v| v.ends_with('1')),
+                        data: match (c.params.get("OUT_CONST"), data_line.get(&(x, y, z))) {
+                            (Some(v), _) => Some(OutData::Const(v.ends_with('1'))),
+                            (None, Some(&line)) => Some(OutData::Line { line, inverted: c.params.get("DATA_INVERT").is_some_and(|v| v.ends_with('1')) }),
+                            _ => None,
+                        },
                         oe_line: None,
                         datain_used: datain.get(&(x, y, z)).copied().unwrap_or_default(),
                         in_reg: None,
@@ -364,11 +459,32 @@ impl Routed {
             }
             for (&(x, y, k), d) in ff_domain.iter().filter(|((x, y, _), _)| (*x, *y) == xy) {
                 let clock = slots.iter().position(|s| *s == Some(*d)).unwrap() as u8;
-                le_at(&mut les, x, y, k).reg = Some(Reg { clock, aclr: None, sync: false });
+                let a = aclr.get(&(x, y, k)).copied();
+                let sc = sclr.get(&(x, y, k)).map(|&line| Ctl { line, inverted: sclr_inv.contains(&(x, y, k)) });
+                if let Some(a) = a {
+                    ensure!(lab.aclr.is_none_or(|o| o == a), "LAB {xy:?}: two clears");
+                    lab.aclr = Some(a);
+                }
+                if let Some(c) = sc {
+                    ensure!(lab.sync.sclr.is_none_or(|o| o == c), "LAB {xy:?}: two sync clears");
+                    lab.sync.sclr = Some(c);
+                }
+                // A cleared register takes LAB clear line 0 (the model's
+                // only one).
+                // Registers on the sync load path load SDATA (input C) every
+                // cycle through the LAB's sload, tied high.
+                let sload = sdata.contains(&(x, y, k));
+                if sload {
+                    lab.sync.sload = Some(Sload::Const);
+                }
+                le_at(&mut les, x, y, k).reg = Some(Reg { clock, aclr: a.map(|_| 0), sync: sc.is_some() || sload });
             }
         }
         for l in les.values() {
             labs.entry((l.x, l.y)).or_default();
+        }
+        for (&(x, y, k), &src) in &pia {
+            labs.entry((x, y)).or_default().pia[k as usize] = Some(src);
         }
         Ok(PhysDesign {
             logic: Logic { les: les.into_values().collect(), clkctrls, labs },
@@ -406,6 +522,7 @@ fn resource(dev: &Device, w: Wire, ioe_out_x: impl Fn(u32, u32, u32) -> u32) -> 
             Some(format!("{}:X{}Y{}S{}I{}", element_name(t.element_enum), e.x, e.y, t.z, t.index))
         }
         Wire::LocalLine { x, y, k } => Some(format!("LOCAL_LINE:X{x}Y{y}S0I{k}")),
+        Wire::Ctrl { x, y, k } => Some(format!("LAB_CONTROL_MUX:X{x}Y{y}S0I{k}")),
         Wire::Ioe { x, y, z, pin: IoePin::DataOut } => Some(format!("IO_DATAOUT:X{}Y{y}S{}I0", ioe_out_x(x, y, z), z % 8)),
         _ => None,
     }
@@ -454,9 +571,56 @@ impl Routed {
                 driver.insert(id, sig);
             }
         }
+        // Feeders: a one-input pass-through (or inverting) LUT whose only
+        // load is its own LE's register. quartus_map deletes such cells
+        // and the fitter puts its own `~feeder` in the same LE, so the
+        // netlist connects the register straight to the source and the rcf
+        // names the physical LUT input as the register's route_port.
+        let mut loads: HashMap<u64, Vec<(&str, &str)>> = HashMap::new();
+        for (name, c) in &self.cells {
+            for (p, &id) in &c.conns {
+                if !["COMBOUT", "COUT", "REGOUT", "OUTCLK"].contains(&p.as_str()) && !(c.ty == "CY2_IBUF") {
+                    loads.entry(id).or_default().push((name.as_str(), p.as_str()));
+                }
+            }
+        }
+        let cell_at: HashMap<Bel, &str> = self.cells.iter().map(|(n, c)| (c.bel, n.as_str())).collect();
+        // LUT cell -> (source net, inverted)
+        let mut feeder: HashMap<&str, (u64, bool)> = HashMap::new();
+        for (name, c) in &self.cells {
+            let Bel::Lut { x, y, k } = c.bel else { continue };
+            let ins: Vec<(usize, u64)> = ["DATAA", "DATAB", "DATAC", "DATAD"]
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| c.conns.get(*p).map(|&id| (i, id)))
+                .collect();
+            let [(i, src)] = ins[..] else { continue };
+            if c.conns.contains_key("CIN") || c.conns.get("COUT").is_some_and(|id| loads.contains_key(id)) {
+                continue;
+            }
+            let buf = [0xAAAAu16, 0xCCCC, 0xF0F0, 0xFF00][i];
+            let m = lut_mask(c)?;
+            if m != buf && m != !buf {
+                continue;
+            }
+            let Some(&out) = c.conns.get("COMBOUT") else { continue };
+            let Some(&ff) = cell_at.get(&Bel::Ff { x, y, k }) else { continue };
+            if loads.get(&out).map(Vec::as_slice) == Some(&[(ff, "DATAIN")][..]) {
+                feeder.insert(name.as_str(), (src, m != buf));
+            }
+        }
+        // Inverted copies of nets (`assign n_inv = ~n`), which Quartus folds
+        // into the load: an output pin's or a LAB control's inversion.
+        let mut inverted: BTreeMap<String, String> = BTreeMap::new();
+        let mut invert = |sig: String| -> String {
+            let w = format!("{sig}_inv");
+            inverted.insert(sig, w.clone());
+            vid(&w)
+        };
         let net = |c: &Cell, p: &str, dflt: &str| -> String {
             c.conns.get(p).and_then(|id| driver.get(id)).map(|s| vid(s)).unwrap_or_else(|| dflt.to_string())
         };
+        let sig_of = |c: &Cell, p: &str| -> Option<String> { c.conns.get(p).and_then(|id| driver.get(id)).cloned() };
 
         // Netlist.
         let mut ports: BTreeMap<String, (bool, Option<u32>)> = BTreeMap::new();
@@ -474,17 +638,27 @@ impl Routed {
             let r = w.map(|m| format!("[{m}:0] ")).unwrap_or_default();
             writeln!(v, "{} {r}{};", if *out { "output" } else { "input" }, vid(p))?;
         }
-        let mut sigs: Vec<&String> = driver.values().filter(|s| !port_of.values().any(|p| p == *s)).collect();
+        let feeder_outs: std::collections::HashSet<&String> =
+            feeder.keys().filter_map(|n| self.cells[*n].conns.get("COMBOUT").and_then(|id| driver.get(id))).collect();
+        let mut sigs: Vec<&String> =
+            driver.values().filter(|s| !port_of.values().any(|p| p == *s) && !feeder_outs.contains(s)).collect();
         sigs.sort();
         for s in sigs {
             writeln!(v, "wire {};", vid(s))?;
         }
         let mut qsf = String::new();
+        // Keep every atom as placed: by default quartus_map drops single-
+        // input LUTs ("redundant logic cells") and the fitter re-adds its
+        // own feeders and folds inverters into neighbours.
+        for a in ["REMOVE_REDUNDANT_USER_CELLS", "REMOVE_REDUNDANT_LOGIC_CELLS", "REMOVE_DUPLICATE_REGISTERS", "REMOVE_DUPLICATE_LOGIC"] {
+            writeln!(qsf, "set_global_assignment -name {a} OFF")?;
+        }
         writeln!(qsf, "set_global_assignment -name ROUTING_BACK_ANNOTATION_MODE NORMAL")?;
         writeln!(qsf, "set_global_assignment -name ROUTING_BACK_ANNOTATION_FILE ../routing.rcf")?;
         for (name, c) in &self.cells {
             let a = vid(&atom[name.as_str()]);
             match c.bel {
+                Bel::Lut { .. } if feeder.contains_key(name.as_str()) => {}
                 Bel::Lut { x, y, k } => {
                     let cin = c.conns.contains_key("CIN");
                     writeln!(v, "cycloneii_lcell_comb {a}(")?;
@@ -501,8 +675,24 @@ impl Routed {
                 Bel::Ff { x, y, k } => {
                     writeln!(v, "cycloneii_lcell_ff {a}(")?;
                     writeln!(v, "  .clk({}),", net(c, "CLK", "1'b0"))?;
-                    writeln!(v, "  .datain({}),", net(c, "DATAIN", "1'b0"))?;
-                    writeln!(v, "  .sdata(1'b0), .aclr(1'b0), .sclr(1'b0), .sload(1'b0), .ena(1'b1),")?;
+                    let d = match cell_at.get(&Bel::Lut { x, y, k }).and_then(|l| feeder.get(l)) {
+                        Some(&(src, inv)) => {
+                            let s = driver.get(&src).context("feeder source")?.clone();
+                            if inv { invert(s) } else { vid(&s) }
+                        }
+                        None => net(c, "DATAIN", "1'b0"),
+                    };
+                    let ctl = |p: &str, inv: &str, dflt: &str, invert: &mut dyn FnMut(String) -> String| match sig_of(c, p) {
+                        Some(s) if flag(c, inv) => invert(s),
+                        Some(s) => vid(&s),
+                        None => dflt.to_string(),
+                    };
+                    let ena = ctl("ENA", "ENA_INV", "1'b1", &mut invert);
+                    let sclr = ctl("SCLR", "SCLR_INV", "1'b0", &mut invert);
+                    writeln!(v, "  .datain({d}),")?;
+                    writeln!(v, "  .ena({ena}), .aclr({}), .sclr({sclr}),", net(c, "ACLR", "1'b0"))?;
+                    let sload = if c.conns.contains_key("SDATA") { "1'b1" } else { "1'b0" };
+                    writeln!(v, "  .sdata({}), .sload({sload}),", net(c, "SDATA", "1'b0"))?;
                     writeln!(v, "  .regout({}));", net(c, "REGOUT", ""))?;
                     writeln!(qsf, "set_location_assignment LCFF_X{x}_Y{y}_N{} -to {}", 2 * k + 1, atom[name.as_str()])?;
                 }
@@ -524,14 +714,18 @@ impl Routed {
                     let p = &atom[name.as_str()];
                     writeln!(qsf, "set_location_assignment PIN_{} -to {p}", pin_at(io, x, y, z)?.name)?;
                     if c.ty == "CY2_OBUF" {
+                        let inv = if c.params.get("DATA_INVERT").is_some_and(|v| v.ends_with('1')) { "~" } else { "" };
                         let d = match c.params.get("OUT_CONST") {
                             Some(k) => if k.ends_with('1') { "1'b1".to_string() } else { "1'b0".to_string() },
-                            None => net(c, "DATAOUT", "1'b0"),
+                            None => format!("{inv}{}", net(c, "DATAOUT", "1'b0")),
                         };
                         writeln!(v, "assign {} = {d};", vid(p))?;
                     }
                 }
             }
+        }
+        for (sig, w) in &inverted {
+            writeln!(v, "wire {};\nassign {} = ~{};", vid(w), vid(w), vid(sig))?;
         }
         writeln!(v, "endmodule")?;
 
@@ -539,7 +733,6 @@ impl Routed {
         let ioe_out_x = |x: u32, y: u32, z: u32| -> u32 {
             pin_at(io, x, y, z).map_or(x, |p| x + u32::from(p.ioe.block == BLOCK_COL && z < 2))
         };
-        let cell_at: HashMap<Bel, &str> = self.cells.iter().map(|(n, c)| (c.bel, n.as_str())).collect();
         // quartus_map names a VQM atom after its (first) output net, and
         // the rcf uses those names for signals and sinks alike.
         let mut rcf_name: HashMap<&str, String> = HashMap::new();
@@ -548,6 +741,23 @@ impl Routed {
             rcf_name.insert(name, out.cloned().unwrap_or_else(|| atom[name.as_str()].clone()));
         }
         let atom = rcf_name;
+        let perm = perms(&self.nets);
+        // Every pad-to-core path at delay setting 6, the model's (and
+        // Quartus' untimed) choice; with a timing constraint the fitter
+        // otherwise picks per destination.
+        for (name, c) in &self.cells {
+            let Bel::Ioe { z, .. } = c.bel else { continue };
+            if c.ty != "CY2_IBUF" || z >= 8 {
+                continue;
+            }
+            let Some(id) = c.conns.get("COMBOUT") else { continue };
+            let mut sinks: Vec<&String> = loads.get(id).into_iter().flatten().map(|(n, _)| &atom[*n]).collect();
+            sinks.sort();
+            sinks.dedup();
+            for s in sinks {
+                writeln!(qsf, "set_instance_assignment -name PAD_TO_CORE_DELAY 6 -from {} -to {s}", atom[name.as_str()])?;
+            }
+        }
         let mut rcf = String::new();
         writeln!(rcf, "section global_data {{\n\trcf_written_by = \"cram quartus-export\";\n\tdevice = EP2C35F672C6;\n}}\n")?;
         for (&id, n) in &self.nets {
@@ -581,14 +791,41 @@ impl Routed {
                     (Some(s), None) => {
                         seen(&s, &mut order);
                         let dest = match p.dst {
-                            Wire::Le { x, y, k, pin: LePin::Input(i) } => {
-                                let c = cell_at.get(&Bel::Lut { x, y, k }).context("LUT at LE input")?;
-                                let port = ["DATAA", "DATAB", "DATAC", "DATAD"][i];
-                                format!("dest = ( {}, {port} ), route_port = {port};", atom[*c])
+                            Wire::Le { x, y, k, pin: LePin::Input(ph) } => {
+                                let lut = cell_at.get(&Bel::Lut { x, y, k });
+                                let names = ["DATAA", "DATAB", "DATAC", "DATAD"];
+                                let phys = names[ph];
+                                let lg: Vec<usize> = (0..4).filter(|&q| perm.get(&(x, y, k)).is_some_and(|m| m[q] == Some(ph))).collect();
+                                let sdata_ff = cell_at
+                                    .get(&Bel::Ff { x, y, k })
+                                    .filter(|ff| ph == 2 && self.cells[**ff].conns.get("SDATA") == Some(&id));
+                                if let Some(ff) = sdata_ff {
+                                    dests.entry(s.clone()).or_default().push(format!("dest = ( {}, SDATA ), route_port = SDATA;", atom[*ff]));
+                                }
+                                ensure!(!lg.is_empty() || sdata_ff.is_some(), "{}: LE input {phys} at X{x}Y{y} LE{k} feeds nothing", n.name);
+                                let d: Vec<String> = match lut {
+                                    _ if lg.is_empty() => vec![],
+                                    Some(c) if feeder.contains_key(*c) => {
+                                        let ff = cell_at.get(&Bel::Ff { x, y, k }).context("feeder's register")?;
+                                        vec![format!("dest = ( {}, DATAIN ), route_port = {phys};", atom[*ff])]
+                                    }
+                                    Some(c) => lg.iter().map(|&q| format!("dest = ( {}, {} ), route_port = {phys};", atom[*c], names[q])).collect(),
+                                    None => bail!("{}: LUT input routed at X{x}Y{y} LE{k} without a LUT", n.name),
+                                };
+                                for x in d {
+                                    dests.entry(s.clone()).or_default().push(x);
+                                }
+                                continue;
                             }
-                            Wire::Le { x, y, k, pin: LePin::Clk } => {
-                                let c = cell_at.get(&Bel::Ff { x, y, k }).context("FF at LE clock")?;
-                                format!("dest = ( {}, CLK );", atom[*c])
+                            Wire::Le { x, y, k, pin: pin @ (LePin::Clk | LePin::Ena | LePin::Aclr | LePin::Sclr) } => {
+                                let c = cell_at.get(&Bel::Ff { x, y, k }).context("FF at LE control")?;
+                                let port = match pin {
+                                    LePin::Clk => "CLK",
+                                    LePin::Ena => "ENA",
+                                    LePin::Aclr => "ACLR",
+                                    _ => "SCLR",
+                                };
+                                format!("dest = ( {}, {port} );", atom[*c])
                             }
                             Wire::ClkIn { g } => {
                                 let c = cell_at.get(&Bel::ClkCtrl { g }).context("clock control")?;

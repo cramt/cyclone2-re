@@ -4,6 +4,27 @@ module \$_DFF_P_ (input D, input C, output Q);
   LCELL_FF _TECHMAP_REPLACE_ (.DATAIN(D), .CLK(C), .REGOUT(Q));
 endmodule
 
+module \$_DFFE_PP_ (input D, input C, input E, output Q);
+  LCELL_FF _TECHMAP_REPLACE_ (.DATAIN(D), .CLK(C), .ENA(E), .REGOUT(Q));
+endmodule
+
+module \$_DFF_PP0_ (input D, input C, input R, output Q);
+  LCELL_FF _TECHMAP_REPLACE_ (.DATAIN(D), .CLK(C), .ACLR(R), .REGOUT(Q));
+endmodule
+
+module \$_DFFE_PP0P_ (input D, input C, input R, input E, output Q);
+  LCELL_FF _TECHMAP_REPLACE_ (.DATAIN(D), .CLK(C), .ENA(E), .ACLR(R), .REGOUT(Q));
+endmodule
+
+module \$_SDFF_PP0_ (input D, input C, input R, output Q);
+  LCELL_FF _TECHMAP_REPLACE_ (.DATAIN(D), .CLK(C), .SCLR(R), .REGOUT(Q));
+endmodule
+
+// Sync clear only on enabled edges: the hardware's priority.
+module \$_SDFFCE_PP0P_ (input D, input C, input R, input E, output Q);
+  LCELL_FF _TECHMAP_REPLACE_ (.DATAIN(D), .CLK(C), .ENA(E), .SCLR(R), .REGOUT(Q));
+endmodule
+
 // LUTs narrower than 4 repeat their table over the unused inputs, so the
 // value those inputs read doesn't matter.
 module \$lut (A, Y);

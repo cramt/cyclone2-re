@@ -4,14 +4,15 @@
 
 read_verilog -lib synth/cells_sim.v
 hierarchy -check -top top
-synth -run :fine -top top
+synth -flatten -run :fine -top top
 memory_map
 opt -full
 techmap -map +/techmap.v -map synth/arith_map.v
 opt -fast
-# Registers power up 0 and have only data and clock in this model: enables
-# and resets go into the LUT in front.
-dfflegalize -cell $_DFF_P_ 0
+# Registers power up 0. Enable, asynchronous clear and synchronous clear
+# (gated by the enable) are LAB-wide signals; one of each per LAB (the
+# placer enforces it), the rest goes into the LUT in front.
+dfflegalize -cell $_DFF_P_ 0 -cell $_DFFE_PP_ 0 -cell $_DFF_PP0_ 0 -cell $_DFFE_PP0P_ 0 -cell $_SDFF_PP0_ 0 -cell $_SDFFCE_PP0P_ 0
 # What is left of init values after dfflegalize is 0, which is how the
 # registers power up anyway.
 attrmap -remove init

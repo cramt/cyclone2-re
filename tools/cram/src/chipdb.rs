@@ -109,13 +109,39 @@ fn lab_tile(db: &Db) -> Result<TileType> {
     for k in 0..=LES {
         t.wire(&format!("CY{k}"), "CARRY");
     }
+    // LAB control lines (rcf LAB_CONTROL_MUX), fed like an LE input.
+    let pia: Vec<_> = (0..4).map(|k| db.lab.feature(arch::LAB_PIA_TO_INPUT, k)).collect::<Result<_>>()?;
+    for (k, f) in pia.iter().enumerate() {
+        t.wire(&format!("CTRL{k}"), "LAB_CONTROL");
+        let aux = f.aux.as_ref().context("LAB_PIA_TO_INPUT is not a source mux")?;
+        for (s, &a) in aux.iter().enumerate() {
+            if a < 0 || f.source_bits(0, s).is_err() {
+                continue;
+            }
+            let src = if s < LAB_LINES { format!("LI{s}") } else { format!("LL{}", s - LAB_LINES) };
+            t.pip(&src, &format!("CTRL{k}"));
+        }
+    }
+    // Which control lines (sources 0-3) and row-clock buffers (4-9) each
+    // register control can take, from the fast-mux source maps.
+    let reachable = |arch_type: i32, group: i32| -> Result<Vec<usize>> {
+        let f = db.lab.feature(arch_type, group)?;
+        let aux = f.aux.as_ref().context("fast mux without source map")?;
+        Ok((0..aux.len()).filter(|&s| aux[s] >= 0).collect())
+    };
+    let mut ena: Vec<usize> = reachable(arch::LAB_CE_FAST_MUX, 0)?;
+    ena.extend(reachable(arch::LAB_CE_FAST_MUX, 1)?);
+    // The model drives a LAB-line clear through clear mux 0 only.
+    let aclr = reachable(arch::LAB_CLEAR_FAST_MUX, 0)?;
+    let sclr = reachable(arch::LAB_SYNC_CLR_FAST_MUX, 0)?;
     let inputs: Vec<_> = (0..4).map(|p| db.lab.feature(arch::LE_LUT_INPUT, p)).collect::<Result<_>>()?;
     for k in 0..LES {
         t.wire(&format!("LL{k}"), "LOCAL_LINE");
         for p in LE_INPUTS {
             t.wire(&format!("LE{k}.{p}"), "LE_INPUT");
+            t.wire(&format!("LE{k}.I{p}"), "LUT_INPUT");
         }
-        for o in ["COMB", "Q", "CLK"] {
+        for o in ["COMB", "Q", "CLK", "ENA", "ACLR", "SCLR"] {
             t.wire(&format!("LE{k}.{o}"), "LE_INTERNAL");
         }
     }
@@ -124,7 +150,13 @@ fn lab_tile(db: &Db) -> Result<TileType> {
         let mut lut = vec![("CIN".into(), format!("CY{k}"), false), ("COUT".into(), format!("CY{}", k + 1), true)];
         lut.push(("COMBOUT".into(), format!("{le}.COMB"), true));
         for (p, f) in LE_INPUTS.iter().zip(&inputs) {
-            lut.push((format!("DATA{p}"), format!("{le}.{p}"), false));
+            // The LUT's logical inputs take any physical input (the LUT
+            // mask is permuted to match, as the fitter does); carry LEs
+            // keep theirs (the uarch's checkPipAvail).
+            lut.push((format!("DATA{p}"), format!("{le}.I{p}"), false));
+            for q in LE_INPUTS {
+                t.pip(&format!("{le}.{q}"), &format!("{le}.I{p}"));
+            }
             let aux = f.aux.as_ref().context("LE_LUT_INPUT is not a source mux")?;
             ensure!(aux.len() == LAB_LINES + LES, "LE_LUT_INPUT has {} sources", aux.len());
             for (s, &a) in aux.iter().enumerate() {
@@ -141,8 +173,19 @@ fn lab_tile(db: &Db) -> Result<TileType> {
         let ff = vec![
             ("DATAIN".into(), format!("{le}.COMB"), false),
             ("CLK".into(), format!("{le}.CLK"), false),
+            ("ENA".into(), format!("{le}.ENA"), false),
+            ("ACLR".into(), format!("{le}.ACLR"), false),
+            ("SCLR".into(), format!("{le}.SCLR"), false),
+            // Synchronous load data: the LE's physical input C.
+            ("SDATA".into(), format!("{le}.C"), false),
             ("REGOUT".into(), format!("{le}.Q"), true),
         ];
+        for (pin, srcs) in [("ENA", &ena), ("ACLR", &aclr), ("SCLR", &sclr)] {
+            for &s in srcs.iter() {
+                let src = if s < 4 { format!("CTRL{s}") } else if s < 10 { format!("BCB{}", s - 4) } else { continue };
+                t.pip(&src, &format!("{le}.{pin}"));
+            }
+        }
         t.bels.push((format!("{le}.FF"), "LCELL_FF".into(), 2 * k as u32 + 1, ff));
         // Output select (LE_REG_OUT_YGR): each of the LE's three outputs
         // takes the LUT or the register.

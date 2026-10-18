@@ -302,6 +302,14 @@ pub enum Role {
     Bidir,
 }
 
+/// An output's data: a LAB-local line into the IOE's data mux, optionally
+/// inverted in the IOE, or a constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutData {
+    Line { line: u32, inverted: bool },
+    Const(bool),
+}
+
 /// How the design uses one pin.
 #[derive(Debug, Clone)]
 pub struct PinUse {
@@ -313,10 +321,9 @@ pub struct PinUse {
     pub drive: Option<u32>,
     pub pull_up: bool,
     pub bus_hold: bool,
-    /// LAB-local line into the output data / output enable mux. `None`
-    /// with a constant: `data_const`.
-    pub data_line: Option<u32>,
-    pub data_const: Option<bool>,
+    /// What the output drives (outputs and bidirs).
+    pub data: Option<OutData>,
+    /// LAB-local line into the output enable mux.
     pub oe_line: Option<u32>,
     /// Which of the two pad-to-core paths (`IO_DATAIN` index) the input
     /// drives the core through.
@@ -387,7 +394,6 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
             None | Some("Default") => None,
             Some(s) => Some(s.strip_suffix("mA").and_then(|n| n.parse().ok()).with_context(|| format!("{}: current {s}", a.name))?),
         };
-        let data_line = lines.get(&(port.clone(), "DATAIN".into())).copied();
         let reg = |mode: &str| a.params.get(mode).is_some_and(|m| m == "register");
         for p in ["areset", "sreset"] {
             ensure!(a.net(p).is_none(), "{}: I/O register {p} isn't modelled", a.name);
@@ -400,9 +406,12 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
         let out_reg = if reg("output_register_mode") { Some(clock("OUTCLK")?) } else { None };
         let oe_reg = reg("oe_register_mode");
         ensure!(!oe_reg || out_reg.is_some(), "{}: OE register without output register isn't modelled", a.name);
-        let data_const = match a.port("datain") {
-            Some("gnd") => Some(false),
-            Some("vcc") => Some(true),
+        // `!net`: the IOE inverts (quartus_map moves inverters feeding
+        // pins into it).
+        let data = match (a.port("datain"), lines.get(&(port.clone(), "DATAIN".into()))) {
+            (Some("gnd"), _) => Some(OutData::Const(false)),
+            (Some("vcc"), _) => Some(OutData::Const(true)),
+            (d, Some(&line)) => Some(OutData::Line { line, inverted: d.is_some_and(|d| d.starts_with('!')) }),
             _ => None,
         };
         out.push(PinUse {
@@ -412,8 +421,7 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
             drive,
             pull_up: pull.contains(&port),
             bus_hold: hold.contains(&port),
-            data_line,
-            data_const,
+            data,
             oe_line: lines.get(&(port.clone(), "OE".into())).copied(),
             // The rcf names the input's core net: the pin itself for a
             // combinational input, the register output for a registered one.
@@ -577,15 +585,18 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
             let code = drive_code(block, u.standard, ma)
                 .with_context(|| format!("{}: no drive code for {:?} at {ma} mA", u.pin, u.standard))?;
             v.push((IO_SET_DRIVE_STRENGTH_ARMSTRONG, -1, code));
-            if u.data_line.is_none() {
-                match u.data_const {
-                    // Observed on the empty design's LED tied to 0.
-                    Some(false) => v.push((IO_DATA_INVERT, -1, &[1])),
-                    // An unselected data mux drives 0, so a 1 needs no
-                    // inversion; observed on bidirs whose data folded to vcc.
-                    Some(true) => {}
-                    None => bail!("{}: output data neither routed nor tied to ground", u.pin),
+            match u.data {
+                // Observed on the empty design's LED tied to 0.
+                Some(OutData::Const(false)) => v.push((IO_DATA_INVERT, -1, &[1])),
+                // An unselected data mux drives 0, so a 1 needs no
+                // inversion; observed on bidirs whose data folded to vcc.
+                Some(OutData::Const(true)) => {}
+                Some(OutData::Line { inverted, .. }) => {
+                    if inverted {
+                        v.push((IO_DATA_INVERT, -1, &[1]));
+                    }
                 }
+                None => bail!("{}: output data neither routed nor constant", u.pin),
             }
         }
         // Each pad-to-core path the input drives turns on its delay
@@ -684,7 +695,11 @@ impl IoDb {
                 }
             }
             if let Some(u) = u {
-                for (a, line) in [(arch::IO_DATA_INPUT, u.data_line), (arch::IO_PIA_TO_OE, u.oe_line)] {
+                let data_line = match u.data {
+                    Some(OutData::Line { line, .. }) => Some(line),
+                    _ => None,
+                };
+                for (a, line) in [(arch::IO_DATA_INPUT, data_line), (arch::IO_PIA_TO_OE, u.oe_line)] {
                     let Some(line) = line else { continue };
                     let m = self.muxes.get(&(p.ioe.block, a)).with_context(|| format!("{}: no source mux {a}", p.name))?;
                     for f in m.bits(p.ioe.path, line).with_context(|| format!("{}: line {line}", p.name))? {
@@ -704,6 +719,18 @@ impl IoDb {
     pub fn data_sources(&self, p: &Pin) -> Vec<u32> {
         let Some(m) = self.muxes.get(&(p.ioe.block, arch::IO_DATA_INPUT)) else { return vec![] };
         (0..m.sel.len() as u32).filter(|&l| m.bits(p.ioe.path, l).is_ok()).collect()
+    }
+
+    /// Which pin and feature (arch type, group) own a bit (debugging aid).
+    pub fn describe(&self, bit: IoBit) -> Option<(String, i32, i32)> {
+        for p in self.pins.values() {
+            for ((a, i), bits) in self.footprint(p.ioe) {
+                if bits.contains(&Some(bit)) {
+                    return Some((p.name.clone(), a, i));
+                }
+            }
+        }
+        None
     }
 
     /// Every bit any IOE owns (for residual accounting).

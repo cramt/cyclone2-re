@@ -368,6 +368,21 @@ fn main() -> Result<()> {
                 println!("{l}");
             }
         }
+        ("io-bits", [a, b]) => {
+            // Debugging aid: differing bits of two RBFs that belong to an IOE.
+            let m = load_db()?;
+            let (a, b) = (Rbf::read(Path::new(a))?, Rbf::read(Path::new(b))?);
+            for fb in a.diff(&b) {
+                if let Some(d) = m.io.describe(cram::io::IoBit::Core(fb)) {
+                    println!("{fb} {}->{} {d:?}", u8::from(a.get(fb)), u8::from(b.get(fb)));
+                }
+            }
+            for rb in a.rep_diff(&b) {
+                if let Some(d) = m.io.describe(cram::io::IoBit::Rep(rb)) {
+                    println!("{rb} {}->{} {d:?}", u8::from(a.rep_get(rb)), u8::from(b.rep_get(rb)));
+                }
+            }
+        }
         ("blank", [out]) => {
             let m = load_db()?;
             std::fs::write(out, cram::blank::image(&m.asmdb, &m.io)?.bytes())?;

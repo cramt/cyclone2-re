@@ -10,8 +10,10 @@ module LCELL_COMB (input DATAA, input DATAB, input DATAC, input DATAD, input CIN
   parameter [15:0] LUT_MASK = 16'hFFFF;
 endmodule
 
+// ENA gates SCLR (only an enabled clock edge clears); ACLR is asynchronous.
+// Unconnected: ENA 1, ACLR and SCLR 0.
 (* blackbox *)
-module LCELL_FF (input DATAIN, input CLK, output REGOUT);
+module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, output REGOUT);
 endmodule
 
 (* blackbox *)

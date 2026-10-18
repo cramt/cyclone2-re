@@ -8,12 +8,14 @@
  *   LCELL_COMB  LUT4 + carry: DATAA..DATAD, CIN -> COMBOUT, COUT; LUT_MASK.
  *               With CIN connected the LUT's C input is the carry, as in
  *               Quartus' sum_lutc_input = "cin".
- *   LCELL_FF    register fed by its own LE's LUT: DATAIN, CLK -> REGOUT.
+ *   LCELL_FF    register fed by its own LE's LUT: DATAIN, CLK, ENA, ACLR, SCLR
+ *               -> REGOUT (ENA gates SCLR, as in the hardware).
  *   CY2_IBUF / CY2_OBUF  pins, placed by `--vopt qsf=<file>` location
  *               assignments (`set_location_assignment PIN_x -to port`).
  *   CLKCTRL     global clock control, inserted here on every clock net.
  */
 
+#include <algorithm>
 #include <fstream>
 #include <queue>
 #include <regex>
@@ -47,6 +49,8 @@ struct Cyclone2Impl : HimbaechelAPI
         po::options_description specific("Cyclone II options");
         specific.add_options()("qsf", po::value<std::string>(),
                                "Quartus-style settings file with `set_location_assignment PIN_x -to port` lines");
+        specific.add_options()("lab-inputs", po::value<int>(),
+                               "most signals from outside a LAB its LEs may use (default 26)");
         return specific;
     }
 
@@ -61,6 +65,9 @@ struct Cyclone2Impl : HimbaechelAPI
     {
         h.init(ctx);
         HimbaechelAPI::init(ctx);
+        init_perm();
+        if (ctx->args.options.count("lab-inputs"))
+            max_lab_inputs = ctx->args.options.at("lab-inputs").as<int>();
     }
 
     std::string getDefaultRouter() const override { return "router2"; }
@@ -71,6 +78,7 @@ struct Cyclone2Impl : HimbaechelAPI
     {
         pack_io();
         pack_constants();
+        pack_lut1();
         pack_lut_ff();
         pack_carry();
         pack_clocks();
@@ -179,6 +187,15 @@ struct Cyclone2Impl : HimbaechelAPI
                 } else if (ci->type == id_CY2_OBUF && usr.port == id_DATAOUT) {
                     ci->setParam(id_OUT_CONST, Property(value ? 1 : 0, 1));
                     ci->disconnectPort(usr.port);
+                } else if (ci->type == id_LCELL_FF && ((usr.port == id_ENA && value) ||
+                                                        (usr.port.in(id_ACLR, id_SCLR) && !value))) {
+                    ci->disconnectPort(usr.port); // the idle level
+                } else if (ci->type == id_LCELL_FF && usr.port == id_ENA) {
+                    // Never enabled: it holds its power-up 0 forever, which
+                    // a register loading 0 every cycle does too.
+                    ci->disconnectPort(id_ENA);
+                    ci->disconnectPort(id_DATAIN);
+                    const_ff.emplace_back(ci, false);
                 } else if (ci->type == id_LCELL_FF && usr.port == id_DATAIN) {
                     ci->disconnectPort(usr.port);
                     const_ff.emplace_back(ci, value);
@@ -203,6 +220,109 @@ struct Cyclone2Impl : HimbaechelAPI
         }
     }
 
+    // quartus_map drops every one-input LUT (buffer or inverter) of an atom
+    // netlist as a "redundant logic cell" and folds the inversion into
+    // whatever it feeds: other LUTs' masks, an output pin's inverter
+    // (IO_DATA_INVERT), a LAB's clock-enable / sync-clear inversion. Doing
+    // the same keeps the open flow's netlist one Quartus would assemble
+    // unchanged. What feeds a register's data input stays: it is the
+    // register's own LUT (a feeder, which Quartus re-creates itself).
+    static int lut_input_index(IdString port)
+    {
+        for (int i = 0; i < 4; i++)
+            if (port == lut_inputs[i])
+                return i;
+        return -1;
+    }
+
+    // Mask of `lut` with input i replaced by (input j, or a constant when
+    // j < 0) XOR inv.
+    static uint64_t substitute(uint64_t mask, int i, int j, bool inv)
+    {
+        uint64_t out = 0;
+        for (int idx = 0; idx < 16; idx++) {
+            int v = (j >= 0 ? (idx >> j) & 1 : 0) ^ int(inv);
+            int src = (idx & ~(1 << i)) | (v << i);
+            out |= ((mask >> src) & 1) << idx;
+        }
+        return out;
+    }
+
+    void pack_lut1()
+    {
+        std::vector<IdString> dead;
+        int folded = 0;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type != id_LCELL_COMB)
+                continue;
+            uint64_t mask = ci->params.at(id_LUT_MASK).as_int64();
+            int only = -1, n_in = 0;
+            for (int i = 0; i < 4; i++)
+                if (ci->getPort(lut_inputs[i])) {
+                    only = i;
+                    n_in++;
+                }
+            if (n_in != 1 || ci->getPort(id_CIN) || (ci->getPort(id_COUT) && !ci->getPort(id_COUT)->users.empty()))
+                continue;
+            const uint64_t bufs[4] = {0xAAAA, 0xCCCC, 0xF0F0, 0xFF00};
+            if (mask != bufs[only] && mask != (~bufs[only] & 0xFFFF))
+                continue;
+            bool inv = mask != bufs[only];
+            NetInfo *in = ci->getPort(lut_inputs[only]);
+            NetInfo *o = ci->getPort(id_COMBOUT);
+            if (!o)
+                continue;
+            std::vector<PortRef> users;
+            for (auto &u : o->users)
+                users.push_back(u);
+            for (auto &u : users) {
+                CellInfo *c = u.cell;
+                int i = c->type == id_LCELL_COMB ? lut_input_index(u.port) : -1;
+                if (i >= 0) {
+                    int j = -1;
+                    for (int k = 0; k < 4; k++)
+                        if (k != i && c->getPort(lut_inputs[k]) == in)
+                            j = k;
+                    uint64_t m = c->params.at(id_LUT_MASK).as_int64();
+                    c->disconnectPort(u.port);
+                    if (j >= 0) {
+                        c->setParam(id_LUT_MASK, Property(substitute(m, i, j, inv), 16));
+                    } else {
+                        if (inv)
+                            c->setParam(id_LUT_MASK, Property(substitute(m, i, i, true), 16));
+                        c->connectPort(u.port, in);
+                    }
+                } else if (c->type == id_CY2_OBUF && u.port == id_DATAOUT) {
+                    c->disconnectPort(u.port);
+                    c->connectPort(u.port, in);
+                    c->setParam(id_DATA_INVERT, Property(int(inv), 1));
+                } else if (c->type == id_LCELL_FF && u.port == id_DATAIN && !inv) {
+                    // A plain buffer in front of a register: the register
+                    // takes the source on its sync load path instead.
+                    c->disconnectPort(u.port);
+                    c->connectPort(u.port, in);
+                } else if (c->type == id_LCELL_FF && u.port.in(id_ENA, id_SCLR)) {
+                    IdString flag = u.port == id_ENA ? id_ENA_INV : id_SCLR_INV;
+                    c->disconnectPort(u.port);
+                    c->connectPort(u.port, in);
+                    c->setParam(flag, Property(int(inv), 1));
+                } else {
+                    continue;
+                }
+                folded++;
+            }
+            if (o->users.empty()) {
+                ci->disconnectPort(lut_inputs[only]);
+                ci->disconnectPort(id_COMBOUT);
+                dead.push_back(ci->name);
+            }
+        }
+        for (IdString n : dead)
+            ctx->cells.erase(n);
+        log_info("Folded %d one-input LUT loads, removed %d LUTs.\n", folded, int(dead.size()));
+    }
+
     void add_lut_ports(CellInfo *lut)
     {
         for (auto p : lut_inputs)
@@ -214,32 +334,31 @@ struct Cyclone2Impl : HimbaechelAPI
 
     dict<IdString, CellInfo *> ff_of_lut;
 
-    // Every register sits beside the LUT that drives it (the only register
-    // data path modelled); registers without one get a pass-through LUT,
-    // as Quartus' `~feeder` cells.
+    // A register driven by a LUT sits beside it (DATAIN is that LUT's
+    // output). Any other register takes its data through the synchronous
+    // load path instead: SDATA (the LE's input C) with the LAB's sload
+    // tied high, the fitter's own register packing. That leaves the LUT
+    // free and needs no feeder LUT (which quartus_map would delete).
     void pack_lut_ff()
     {
         std::vector<CellInfo *> ffs;
         for (auto &cell : ctx->cells)
             if (cell.second->type == id_LCELL_FF)
                 ffs.push_back(cell.second.get());
-        int feeders = 0;
+        int sdata = 0;
         for (CellInfo *ff : ffs) {
             NetInfo *d = ff->getPort(id_DATAIN);
             if (!d)
                 log_error("register %s has no data input\n", ctx->nameOf(ff));
             CellInfo *drv = d->driver.cell;
             if (!(drv && drv->type == id_LCELL_COMB && d->driver.port == id_COMBOUT && !ff_of_lut.count(drv->name))) {
-                CellInfo *lut = ctx->createCell(ctx->idf("%s$feeder", ctx->nameOf(ff)), id_LCELL_COMB);
-                add_lut_ports(lut);
-                lut->setParam(id_LUT_MASK, Property(0xAAAA, 16)); // COMBOUT = DATAA
-                NetInfo *n = ctx->createNet(ctx->idf("%s$feeder_net", ctx->nameOf(ff)));
                 ff->disconnectPort(id_DATAIN);
-                lut->connectPort(id_DATAA, d);
-                lut->connectPort(id_COMBOUT, n);
-                ff->connectPort(id_DATAIN, n);
-                drv = lut;
-                feeders++;
+                if (!ff->ports.count(id_SDATA))
+                    ff->addInput(id_SDATA);
+                ff->connectPort(id_SDATA, d);
+                ff->setParam(id_SLOAD, Property(1, 1));
+                sdata++;
+                continue;
             }
             ff_of_lut[drv->name] = ff;
             drv->cluster = drv->name;
@@ -250,7 +369,7 @@ struct Cyclone2Impl : HimbaechelAPI
             ff->constr_abs_z = false;
             drv->constr_children.push_back(ff);
         }
-        log_info("Packed %d registers with their LUTs (%d feeder LUTs).\n", int(ffs.size()), feeders);
+        log_info("Packed %d registers with their LUTs, %d on the sync load path.\n", int(ffs.size()) - sdata, sdata);
     }
 
     // Carry chains: LE k -> k+1 in a LAB, LE 15 -> LE 0 of the LAB below.
@@ -404,6 +523,44 @@ struct Cyclone2Impl : HimbaechelAPI
         }
     }
 
+    // --- LUT input permutation ---
+    //
+    // In LAB tiles every physical LE input LE<k>.<P> has a pip to every
+    // logical LUT input LE<k>.I<Q>. Carry LEs can't permute (C is the carry
+    // in, D picks the sum or carry half), so only P == Q is open for them.
+    int lab_type = -1;
+    std::vector<int> perm_le; // pip index in the LAB tile type -> LE, or -1
+
+    void init_perm()
+    {
+        for (BelId bel : ctx->getBels())
+            if (ctx->getBelType(bel) == id_LCELL_COMB) {
+                lab_type = ctx->chip_info->tile_insts[bel.tile].type;
+                break;
+            }
+        const auto &tt = ctx->chip_info->tile_types[lab_type];
+        perm_le.assign(tt.pips.ssize(), -1);
+        for (int i = 0; i < tt.pips.ssize(); i++) {
+            std::string dst = IdString(tt.wires[tt.pips[i].dst_wire].name).str(ctx);
+            std::string src = IdString(tt.wires[tt.pips[i].src_wire].name).str(ctx);
+            int k;
+            char q, p;
+            if (sscanf(dst.c_str(), "LE%d.I%c", &k, &q) == 2 && sscanf(src.c_str(), "LE%*d.%c", &p) == 1 && p != q &&
+                src.size() == dst.size() - 1)
+                perm_le[i] = k;
+        }
+    }
+
+    bool checkPipAvail(PipId pip) const override
+    {
+        if (ctx->chip_info->tile_insts[pip.tile].type != lab_type || perm_le.at(pip.index) < 0)
+            return true;
+        Loc l = ctx->getPipLocation(pip);
+        const CellInfo *lut = ctx->getBoundBelCell(ctx->getBelByLocation(Loc(l.x, l.y, 2 * perm_le[pip.index])));
+        // Chain heads too: their D still splits sum from carry.
+        return !(lut && (lut->getPort(id_CIN) || (lut->getPort(id_COUT) && !lut->getPort(id_COUT)->users.empty())));
+    }
+
     // --- placement validity ---
 
     bool isBelLocationValid(BelId bel, bool explain_invalid) const override
@@ -417,29 +574,98 @@ struct Cyclone2Impl : HimbaechelAPI
         const CellInfo *ff = ctx->getBoundBelCell(ctx->getBelByLocation(Loc(l.x, l.y, 2 * k + 1)));
         if (ff) {
             const CellInfo *lut = ctx->getBoundBelCell(ctx->getBelByLocation(Loc(l.x, l.y, 2 * k)));
-            if (!lut || lut->getPort(id_COMBOUT) != ff->getPort(id_DATAIN))
+            const NetInfo *sd = ff->getPort(id_SDATA);
+            if (ff->getPort(id_DATAIN) && (!lut || lut->getPort(id_COMBOUT) != ff->getPort(id_DATAIN)))
                 return false;
+            // SDATA takes physical input C: the LUT has three left.
+            if (sd && lut) {
+                int others = 0;
+                for (auto p : lut_inputs)
+                    others += lut->getPort(p) && lut->getPort(p) != sd;
+                if (others > 3)
+                    return false;
+            }
         }
-        // Two LAB clocks.
-        const NetInfo *clk[2] = {nullptr, nullptr};
+        // LAB-wide register controls: two clocks, each with its own enable
+        // (at most one enabled clock: the enable's control line decides
+        // which LAB clock it pairs with, and two could collide), one
+        // asynchronous and one synchronous clear.
+        // A control is its net plus whether the LAB inverts it.
+        using Ctl = std::pair<const NetInfo *, bool>;
+        std::vector<std::pair<const NetInfo *, Ctl>> domains;
+        Ctl ena{nullptr, false}, aclr{nullptr, false}, sclr{nullptr, false};
+        auto one = [](Ctl &slot, Ctl n) {
+            if (!n.first || slot == n)
+                return true;
+            if (slot.first)
+                return false;
+            slot = n;
+            return true;
+        };
+        auto flag = [](const CellInfo *c, IdString p) {
+            return c->params.count(p) && c->params.at(p).as_int64() != 0;
+        };
+        // A LAB's sload is tied high for SDATA registers, and the per-LE
+        // sync enable takes the LAB's clear and load together: registers
+        // using either must all use the same combination of the two.
+        int sync_kind = 0; // bit 0: SDATA, bit 1: SCLR
+        // Signals from outside the LAB arrive on its local lines (38, of
+        // which each LE input reaches about half); LE outputs used in the
+        // same LAB come back on their own LOCAL_LINE. Bounding the outside
+        // inputs keeps a full LAB routable.
+        if (!lab_inputs_fit(l.x, l.y))
+            return false;
         for (int i = 0; i < 16; i++) {
             const CellInfo *c = ctx->getBoundBelCell(ctx->getBelByLocation(Loc(l.x, l.y, 2 * i + 1)));
             if (!c)
                 continue;
-            const NetInfo *n = c->getPort(id_CLK);
-            if (n == clk[0] || n == clk[1])
-                continue;
-            if (!clk[0])
-                clk[0] = n;
-            else if (!clk[1])
-                clk[1] = n;
-            else {
+            int kind = (c->getPort(id_SDATA) ? 1 : 0) | (c->getPort(id_SCLR) ? 2 : 0);
+            if (kind && sync_kind && kind != sync_kind)
+                return false;
+            sync_kind |= kind;
+            Ctl e{c->getPort(id_ENA), flag(c, id_ENA_INV)};
+            std::pair<const NetInfo *, Ctl> d{c->getPort(id_CLK), e};
+            if (std::find(domains.begin(), domains.end(), d) == domains.end())
+                domains.push_back(d);
+            if (domains.size() > 2 || !one(ena, e) || !one(aclr, Ctl{c->getPort(id_ACLR), false}) ||
+                !one(sclr, Ctl{c->getPort(id_SCLR), flag(c, id_SCLR_INV)})) {
                 if (explain_invalid)
-                    log_nonfatal_error("LAB X%dY%d needs more than two clocks\n", l.x, l.y);
+                    log_nonfatal_error("LAB X%dY%d: register controls don't fit\n", l.x, l.y);
                 return false;
             }
         }
         return true;
+    }
+
+    int max_lab_inputs = 26;
+
+    bool lab_inputs_fit(int x, int y) const
+    {
+        std::vector<const NetInfo *> ext;
+        auto add = [&](const NetInfo *n) {
+            if (!n)
+                return;
+            const CellInfo *d = n->driver.cell;
+            if (d && d->bel != BelId() && d->type.in(id_LCELL_COMB, id_LCELL_FF)) {
+                Loc dl = ctx->getBelLocation(d->bel);
+                if (dl.x == x && dl.y == y)
+                    return;
+            }
+            if (std::find(ext.begin(), ext.end(), n) == ext.end())
+                ext.push_back(n);
+        };
+        for (int z = 0; z < 32; z++) {
+            const CellInfo *c = ctx->getBoundBelCell(ctx->getBelByLocation(Loc(x, y, z)));
+            if (!c)
+                continue;
+            if (c->type == id_LCELL_COMB)
+                for (auto p : lut_inputs)
+                    add(c->getPort(p));
+            else
+                for (auto p : {id_SDATA, id_ENA, id_SCLR, id_ACLR})
+                    add(c->getPort(p));
+        }
+        return int(ext.size()) <= max_lab_inputs;
     }
 
     IdString getBelBucketForCellType(IdString cell_type) const override
