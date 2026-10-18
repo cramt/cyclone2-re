@@ -633,7 +633,13 @@ small design.
 devshell's `nextpnr-himbaechel`). Cells come from `synth/cyclone2.ys`:
 `LCELL_COMB` (LUT4 + carry), `LCELL_FF` (data, clock, enable, async clear,
 sync clear gated by the enable), pin buffers; the packer adds clock
-controls. Rules it enforces, each a Quartus-legal LAB: at most two
+controls. The maps tie every unused cell input (LUT inputs and CIN to 1,
+enable to 1, clears to 0), the yosys convention, so the cells can have
+plain simulation models. The packer folds constants into LUT masks as
+Quartus does, except a 1 on DATAC, DATAD or CIN, which it only disconnects:
+that is what an unconnected input reads, and folding it would rewrite the
+carry half of the mask (COUT reads DATAD = 0) or LUT input C, which DATAC
+shares with CIN. Rules it enforces, each a Quartus-legal LAB: at most two
 clock/enable pairs and one enable, one async clear, one sync clear per LAB;
 registers on the sync-load path and sync-cleared ones don't mix; a register
 sits beside the LUT that drives it, or takes its data on SDATA (input C)

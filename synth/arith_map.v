@@ -1,5 +1,5 @@
 // $alu -> LE carry chain. Each LE adds one bit: DATAA = A, DATAB = B,
-// CIN = carry in; the upper half of the mask (DATAD unconnected reads 1) is
+// CIN = carry in; the upper half of the mask (DATAD tied to 1) is
 // the sum, the lower half (what COUT always uses, DATAD = 0) the carry.
 // A constant carry-in is folded into bit 0, whose mask then ignores C so
 // the chain head's hardware carry-in doesn't matter; a signal carry-in
@@ -59,7 +59,8 @@ module _80_cy2_alu (A, B, CI, BI, X, Y, CO);
   (* force_downto *) wire [Y_WIDTH:0] C;
   generate
     if (!CI_CONST)
-      LCELL_COMB #(.LUT_MASK(16'h00AA)) carry_in (.DATAA(CI), .COUT(C[0]));
+      LCELL_COMB #(.LUT_MASK(16'h00AA)) carry_in (.DATAA(CI), .DATAB(1'b1), .DATAC(1'b1), .DATAD(1'b1),
+        .CIN(1'b1), .COUT(C[0]));
   endgenerate
 
   genvar i;
@@ -67,15 +68,18 @@ module _80_cy2_alu (A, B, CI, BI, X, Y, CO);
     for (i = 0; i < Y_WIDTH; i = i + 1) begin : bit
       if (i == 0 && CI_CONST)
         LCELL_COMB #(.LUT_MASK(lcmask(HEAD_MODE, INV_B))) lc (
-          .DATAA(A_buf[i]), .DATAB(BB[i]), .COMBOUT(Y[i]), .COUT(C[i+1]));
+          .DATAA(A_buf[i]), .DATAB(BB[i]), .DATAC(1'b1), .DATAD(1'b1), .CIN(1'b1),
+          .COMBOUT(Y[i]), .COUT(C[i+1]));
       else
         LCELL_COMB #(.LUT_MASK(lcmask(0, INV_B))) lc (
-          .DATAA(A_buf[i]), .DATAB(BB[i]), .CIN(C[i]), .COMBOUT(Y[i]), .COUT(C[i+1]));
+          .DATAA(A_buf[i]), .DATAB(BB[i]), .DATAC(1'b1), .DATAD(1'b1), .CIN(C[i]),
+          .COMBOUT(Y[i]), .COUT(C[i+1]));
     end
   endgenerate
 
   wire top_carry;
-  LCELL_COMB #(.LUT_MASK(16'hF000)) carry_out (.CIN(C[Y_WIDTH]), .COMBOUT(top_carry));
+  LCELL_COMB #(.LUT_MASK(16'hF000)) carry_out (.DATAA(1'b1), .DATAB(1'b1), .DATAC(1'b1), .DATAD(1'b1),
+    .CIN(C[Y_WIDTH]), .COMBOUT(top_carry));
 
   assign X = A_buf ^ BX;
   generate

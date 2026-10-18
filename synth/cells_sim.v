@@ -2,7 +2,7 @@
 // Behaviour follows Quartus' cycloneii_lcell_comb/_ff: COMBOUT is a LUT4 over
 // (DATAA, DATAB, C, DATAD) with C = CIN when CIN is connected, else DATAC;
 // COUT is the same LUT with C = CIN and DATAD = 0. Unconnected LUT inputs
-// read 1, as Quartus ties them to vcc.
+// read 1, as Quartus ties them to vcc; the maps tie unused inputs to 1.
 
 (* blackbox *)
 module LCELL_COMB (input DATAA, input DATAB, input DATAC, input DATAD, input CIN,
@@ -11,7 +11,7 @@ module LCELL_COMB (input DATAA, input DATAB, input DATAC, input DATAD, input CIN
 endmodule
 
 // ENA gates SCLR (only an enabled clock edge clears); ACLR is asynchronous.
-// Unconnected: ENA 1, ACLR and SCLR 0.
+// Unconnected (the maps tie them so): ENA 1, ACLR and SCLR 0.
 (* blackbox *)
 module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, output REGOUT);
 endmodule

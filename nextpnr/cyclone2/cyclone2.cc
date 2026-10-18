@@ -189,20 +189,30 @@ struct Cyclone2Impl : HimbaechelAPI
                     continue;
                 IdString p = usr.port;
                 if (ci->type == id_LCELL_COMB && (p.in(id_DATAA, id_DATAB, id_DATAC, id_DATAD) || p == id_CIN)) {
-                    // CIN only acts as LUT input C (and the carry LUT's C);
-                    // folding it makes both independent of the hardware cin.
-                    int bit = p == id_CIN ? 2 : lut_input_index(p);
-                    uint64_t mask = ci->params.at(id_LUT_MASK).as_int64();
-                    ci->setParam(id_LUT_MASK, Property(substitute(mask, bit, -1, value), 16));
+                    // On DATAC, DATAD and CIN a 1 is only disconnected: it is
+                    // what an unconnected input reads, and yosys ties every
+                    // unused input to 1. Folding it would rewrite the carry
+                    // half of the mask, which COUT reads with DATAD = 0, or
+                    // for DATAC the LUT input C it shares with CIN. Anything
+                    // else is folded, which is also what Quartus does with the
+                    // mask. CIN only acts as LUT input C (and the carry LUT's
+                    // C); folding it makes both independent of the hardware cin.
+                    if (!value || p.in(id_DATAA, id_DATAB)) {
+                        int bit = p == id_CIN ? 2 : lut_input_index(p);
+                        uint64_t mask = ci->params.at(id_LUT_MASK).as_int64();
+                        ci->setParam(id_LUT_MASK, Property(substitute(mask, bit, -1, value), 16));
+                    }
                     ci->disconnectPort(p);
                     bool any = ci->getPort(id_CIN);
                     for (auto q : lut_inputs)
                         any |= ci->getPort(q) != nullptr;
                     if (!any) {
-                        // Every entry is now the same: the LUT is a constant.
-                        bool v = ci->params.at(id_LUT_MASK).as_int64() & 1;
-                        make_const(ci, id_COMBOUT, v);
-                        make_const(ci, id_COUT, v);
+                        // The LUT is a constant: what it reads with every
+                        // remaining (unconnected) input at 1, and DATAD = 0
+                        // for COUT.
+                        uint64_t mask = ci->params.at(id_LUT_MASK).as_int64();
+                        make_const(ci, id_COMBOUT, (mask >> 15) & 1);
+                        make_const(ci, id_COUT, (mask >> 7) & 1);
                         dead_cells.insert(ci->name);
                         const_luts++;
                     }
