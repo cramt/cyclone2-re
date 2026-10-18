@@ -72,3 +72,7 @@ open-build dir:
 # Quartus assembles the open flow's placement and routing for <dir>; compare with our RBF
 validate dir:
     tools/validate.sh {{dir}}
+
+# Load an RBF into the DE2's FPGA over its onboard USB-Blaster (volatile; gone on power cycle)
+flash rbf:
+    openFPGALoader -c usb-blaster {{rbf}}
