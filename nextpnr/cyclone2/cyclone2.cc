@@ -281,6 +281,55 @@ struct Cyclone2Impl : HimbaechelAPI
         return out;
     }
 
+    static bool feeds_register_data(const CellInfo *lut)
+    {
+        const NetInfo *o = lut->getPort(id_COMBOUT);
+        if (o)
+            for (auto &u : o->users)
+                if (u.cell->type == id_LCELL_FF && u.port == id_DATAIN)
+                    return true;
+        return false;
+    }
+
+    // An inverter in front of a register can't fold into it, and Quartus
+    // would re-create it somewhere of its own choosing. Instead invert the
+    // LUT driving the inverter's input and undo that on every other load,
+    // when they all can take it; the inverter is then a plain buffer.
+    bool push_inversion_back(CellInfo *inverter, NetInfo *in)
+    {
+        CellInfo *d = in->driver.cell;
+        if (!d || d->type != id_LCELL_COMB || in->driver.port != id_COMBOUT || d->getPort(id_CIN) ||
+            (d->getPort(id_COUT) && !d->getPort(id_COUT)->users.empty()))
+            return false;
+        for (auto &u : in->users) {
+            if (u.cell == inverter)
+                continue;
+            bool ok = (u.cell->type == id_LCELL_COMB && lut_input_index(u.port) >= 0) ||
+                      (u.cell->type == id_CY2_OBUF && u.port == id_DATAOUT) ||
+                      (u.cell->type == id_LCELL_FF && u.port.in(id_ENA, id_SCLR));
+            if (!ok)
+                return false;
+        }
+        auto toggle = [](CellInfo *c, IdString flag) {
+            bool v = c->params.count(flag) && c->params.at(flag).as_int64() != 0;
+            c->setParam(flag, Property(int(!v), 1));
+        };
+        d->setParam(id_LUT_MASK, Property(~d->params.at(id_LUT_MASK).as_int64() & 0xFFFF, 16));
+        for (auto &u : in->users) {
+            if (u.cell == inverter)
+                continue;
+            if (u.cell->type == id_LCELL_COMB) {
+                int i = lut_input_index(u.port);
+                u.cell->setParam(id_LUT_MASK, Property(substitute(u.cell->params.at(id_LUT_MASK).as_int64(), i, i, true), 16));
+            } else if (u.cell->type == id_CY2_OBUF) {
+                toggle(u.cell, id_DATA_INVERT);
+            } else {
+                toggle(u.cell, u.port == id_ENA ? id_ENA_INV : id_SCLR_INV);
+            }
+        }
+        return true;
+    }
+
     void pack_lut1()
     {
         std::vector<IdString> dead;
@@ -303,6 +352,25 @@ struct Cyclone2Impl : HimbaechelAPI
                 continue;
             bool inv = mask != bufs[only];
             NetInfo *in = ci->getPort(lut_inputs[only]);
+            if (inv && feeds_register_data(ci)) {
+                if (push_inversion_back(ci, in)) {
+                    inv = false;
+                } else if (CellInfo *d = in->driver.cell; d && d->type == id_LCELL_COMB && in->driver.port == id_COMBOUT &&
+                                                           !d->getPort(id_CIN) &&
+                                                           !(d->getPort(id_COUT) && !d->getPort(id_COUT)->users.empty())) {
+                    // Otherwise make the inverter an inverted copy of its
+                    // driver: a real LUT Quartus keeps where it is.
+                    ci->disconnectPort(lut_inputs[only]);
+                    for (auto p : lut_inputs)
+                        if (NetInfo *n = d->getPort(p)) {
+                            if (!ci->ports.count(p))
+                                ci->addInput(p);
+                            ci->connectPort(p, n);
+                        }
+                    ci->setParam(id_LUT_MASK, Property(~d->params.at(id_LUT_MASK).as_int64() & 0xFFFF, 16));
+                    continue;
+                }
+            }
             NetInfo *o = ci->getPort(id_COMBOUT);
             if (!o)
                 continue;
@@ -470,7 +538,8 @@ struct Cyclone2Impl : HimbaechelAPI
     // Quartus re-expresses every carry chain with the carry inverted after
     // each odd chain position (observed: counters from quartus_map, and our
     // own chains fed back to it as an atom netlist come out rewritten so),
-    // and in the last LE copies the sum into the unused carry half. Both
+    // in the last LE copies the sum into the unused carry half, and clears
+    // a sum half nothing uses. Both
     // forms compute the same thing; using Quartus' makes the bitstream
     // byte-comparable with what it assembles from the same placement.
     void normalise_carry_polarity(const std::vector<CellInfo *> &chain)
@@ -489,6 +558,11 @@ struct Cyclone2Impl : HimbaechelAPI
             NetInfo *co = c->getPort(id_COUT);
             if (i + 1 == chain.size() && (!co || co->users.empty()))
                 out = (out & 0xFF00) | (out >> 8);
+            // An unused sum half is all zeros (comparators: only the carry
+            // out of the top is used).
+            NetInfo *so = c->getPort(id_COMBOUT);
+            if (!so || so->users.empty())
+                out &= 0x00FF;
             c->setParam(id_LUT_MASK, Property(out, 16));
         }
     }
