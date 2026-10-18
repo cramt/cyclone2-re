@@ -53,7 +53,7 @@ io-fuzz out campaign +seeds:
 # Assemble each design dir from the model alone and compare with Quartus's RBF
 roundtrip +dirs:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
-    tools/cram/target/release/cram roundtrip specimens/route/empty/build/output_files/top.rbf {{dirs}}
+    tools/cram/target/release/cram roundtrip - {{dirs}}
 
 # nextpnr chip database from your Quartus device files (build/chipdb/, never committed; ~12 min, ~3 GB RAM)
 chipdb:

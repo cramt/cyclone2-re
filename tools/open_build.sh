@@ -16,7 +16,8 @@ design=$(realpath "$1")
 out="$design/build"
 mkdir -p "$out"
 chipdb="$root/build/chipdb/chipdb-EP2C35F672C6.bin"
-blank="${CRAM_BASE:-$root/build/chipdb/base.rbf}"
+# Base image: generated from the device DB (`cram blank`) unless CRAM_BASE names an RBF.
+blank="${CRAM_BASE:--}"
 nextpnr="${NEXTPNR:-nextpnr-himbaechel}"
 cram="$root/tools/cram/target/release/cram"
 [[ -f "$chipdb" ]] || { echo "no chip database: run 'just chipdb' first" >&2; exit 1; }

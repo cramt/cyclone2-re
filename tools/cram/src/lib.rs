@@ -1,6 +1,7 @@
 //! Cyclone II EP2C35 bitstream addressing and assembly. Device facts come
 //! from the `ddb` crate; this crate owns where they land in an RBF.
 pub mod addr;
+pub mod blank;
 pub mod chipdb;
 pub mod lab;
 pub mod logic;

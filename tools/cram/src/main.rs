@@ -24,6 +24,8 @@ fn usage() -> ! {
       nextpnr routed design (himbaechel --write) -> RBF
   cram quartus-export <routed.json> <dir>  the same placement and routing as Quartus input
                                            (top.vqm, assignments.qsf, routing.rcf)
+  cram blank <out.rbf>                     base image built from the device DB alone; any
+                                           <empty.rbf> argument can be `-` for it
   cram chipdb <out.txt>                    nextpnr chip database description (for
                                            nextpnr/cyclone2/gen_chipdb.py)"
     );
@@ -63,12 +65,13 @@ fn load_db() -> Result<Db> {
         dev: Device::load(&devinfo(), "magellan4")?,
         lab: cram::lab::LabDb::new(&db)?,
         io: cram::io::IoDb::new(&devinfo(), &db)?,
+        asmdb: db,
     })
 }
 
 fn check(empty: &Path, dirs: &[String]) -> Result<()> {
     let m = load_db()?;
-    let base = Rbf::read(empty)?;
+    let base = base(&m, empty)?;
     let mut tot = BTreeMap::<String, usize>::new();
     for d in dirs {
         let dir = Path::new(d);
@@ -142,9 +145,18 @@ fn is_io_region(b: FrameBit) -> bool {
     })
 }
 
+/// The base image: an RBF file, or `-` for the one `blank` builds.
+fn base(m: &Db, arg: &Path) -> Result<Rbf> {
+    if arg == Path::new("-") {
+        cram::blank::image(&m.asmdb, &m.io)
+    } else {
+        Rbf::read(arg)
+    }
+}
+
 /// Base image + the physical design's bits, check words recomputed.
 fn pack(m: &Db, empty: &Path, des: &PhysDesign) -> Result<(Rbf, Bits)> {
-    let mut rbf = Rbf::read(empty)?;
+    let mut rbf = base(m, empty)?;
     let bits = des.bits(m)?;
     anyhow::ensure!(bits.conflicts().is_empty(), "model sets {} bits both ways", bits.conflicts().len());
     for &(b, v, _) in &bits.core {
@@ -355,6 +367,10 @@ fn main() -> Result<()> {
             for l in lines {
                 println!("{l}");
             }
+        }
+        ("blank", [out]) => {
+            let m = load_db()?;
+            std::fs::write(out, cram::blank::image(&m.asmdb, &m.io)?.bytes())?;
         }
         ("chipdb", [out]) => {
             let m = load_db()?;

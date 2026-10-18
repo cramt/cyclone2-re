@@ -28,6 +28,11 @@ pub fn frame_bit(flat: u32) -> FrameBit {
     FrameBit { frame: (LAST_FRAME - col) as u16, bit: (byte * 8 + lane) as u16 }
 }
 
+/// The bit at (frame, CRAM row).
+pub fn frame_row(frame: u32, row: u32) -> FrameBit {
+    frame_bit(row * COLUMNS + (LAST_FRAME - frame))
+}
+
 /// Inverse of `frame_bit`; `None` for frames 0-23 and for (byte, lane)
 /// slots no flat address maps to.
 pub fn flat(fb: FrameBit) -> Option<u32> {

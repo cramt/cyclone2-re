@@ -96,6 +96,7 @@ impl Bits {
 
 /// The device facts `bits` needs.
 pub struct Db {
+    pub asmdb: ddb::asmdb::Asmdb,
     pub dev: Device,
     pub lab: LabDb,
     pub io: IoDb,
