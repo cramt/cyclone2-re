@@ -45,3 +45,12 @@ netlist dir:
 # LE/LAB fuzz: one design per seed (generate, compile, back-annotate, netlist)
 lab-fuzz out +seeds:
     for s in {{seeds}}; do echo $s; done | xargs -P 6 -I{} tools/lab_fuzz.sh {{out}}/l{} {} 6
+
+# I/O fuzz: one design per seed for a gen_io.py campaign (roles, attr, std, reg, unused, mixu)
+io-fuzz out campaign +seeds:
+    for s in {{seeds}}; do echo $s; done | xargs -P 6 -I{} tools/io_fuzz.sh {{out}}/{{campaign}}{} {} {{campaign}}
+
+# Assemble each design dir from the model alone and compare with Quartus's RBF
+roundtrip +dirs:
+    cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
+    tools/cram/target/release/cram roundtrip specimens/route/empty/build/output_files/top.rbf {{dirs}}

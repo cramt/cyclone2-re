@@ -335,6 +335,55 @@ reads it, and `ddb asmdb-canon` matches the trace. **[obs]**
   bit s−1. A `DECISION_MUX` has a −3 sentinel plus one real bit. **[obs]**
   on the LAB and clkctrl groups, not checked elsewhere.
 
+#### IOE groups and CFF bits
+
+Block types 5 (row IOE, left and right edges), 6 (column IOE, top and
+bottom), 60 and 61 (dedicated clock input, p and n pad) hold the I/O
+element features: 43, 42, 2 and 1 groups. `tools/cram/src/io.rs` uses
+them. **[obs]** for everything below unless tagged.
+
+- They are STD and DUMB groups, so their bits are absolute. A muxed
+  group has one path per IOE (239 row, 220 column, 8 + 8 clock). A DUMB
+  group lists one bit per IOE in the same order: its pull-up and bus-hold
+  blocks agree with the muxed groups' drive-strength blocks on all 459
+  IOEs.
+- Path *i* of block 5 (6) is the *i*-th `Row I/O` (`Column I/O`) pad of
+  `ddb_<die>_pad` in pad-id order. Dedicated clock pads pair up in pad-id
+  order, pair *i* being path *i*; the `p` pad of the pair is in block
+  60, the `n` pad in 61 (pad `alt_name` ending in `A`). Checked against
+  every output-data mux of the I/O fuzz designs and the 16 clock pins.
+- A bit value is a flat CRAM address (`>= 0`), `-3` for a slot this IOE
+  doesn't have (column IOEs lack the LVDS input or output select, row
+  IOEs the duty-cycle bits), or `0xa0000000 | k` for **CFF bit** *k*.
+  The asmdb die header counts 12,456 CFF bits; they are what the 6
+  replicated frames at the front of the RBF hold.
+- CFF bits come in blocks of 24 (*j* = *k* / 24): one block per IOE,
+  one per dedicated clock input, eight for the PLLs (*j* 0-7). Block *j*
+  lives in one bit-in-byte lane of the replicated frames at byte slot
+  *u* = *k* − off, frame *u* / 311, byte *u* % 311 + 1. Fit, **[obs]**
+  on every IOE bit of the I/O fuzz designs:
+
+  | lane | first block *j* | off |
+  |---|---|---|
+  | 7 | 0 | −216 |
+  | 6 | 64 | 1176 |
+  | 5 | 126 | 2808 |
+  | 4 | 190 | 4440 |
+  | 3 | 266 | 6024 |
+  | 2 | 324 | 7368 |
+  | 1 | 388 | 9120 |
+  | 0 | 452 | 10704 |
+
+  The lane boundaries fall between the dedicated clock blocks; where
+  exactly in the unused gaps (e.g. *j* 122-125) is **[inf]**.
+- `IO_DATA_INPUT` (output data) and `IO_PIA_TO_OE` (output enable) are
+  two-level source muxes like the LAB's: `aux[line]` is the first-level
+  bit, `next_mux_selection[line]` the second, the source index being the
+  LAB-local line (`LOCAL_INTERCONNECT` index in the rcf) that feeds the
+  pin. 21 sources on column IOEs, 42 on row IOEs.
+- No slew-rate feature exists for these blocks (`IO_USE_SLOW_SLEW` and
+  `MIO_SET_*SLEW*` are absent), so Cyclone II slew is not configurable.
+
 libddb_bcm2bits.so reads `*.bcm.xml` files. No such files exist for
 `cycloneii`, so it plays no part in this family. **[inf]**
 
@@ -458,6 +507,8 @@ ASM node count equal to element count, and all edges inside the graph.
 - `DEV_ELEMENT_ENUM` value names.
 - The meaning of exclusion groups, and of the
   `use_encoded_setting`/`is_encoded_bit_high` bits (about 1.5% of bits).
-- `asmdb`: IOE, M4K, MAC and PLL group semantics (decoded, unused);
-  `asmdb_dirt`, `place` and `timing`.
+- `asmdb`: M4K, MAC and PLL group semantics (decoded, unused); IOE
+  features the I/O fuzz designs never exercised (DDIO, LVDS, register
+  clears/enables, non-default delay chains); `asmdb_dirt`, `place` and
+  `timing`.
 - Most `pad`/`pkg` info-body slots. Only the ones in the table above are named.

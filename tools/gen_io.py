@@ -18,6 +18,8 @@ Campaigns:
          FAST_INPUT/OUTPUT/OUTPUT_ENABLE_REGISTER flops on random pins
   unused (with fraction 0) nothing but the unused-pin mode under test,
          taken from the seed: see UNUSED_MODES
+  mixu   roles plus a random unused-pin mode (held-out check of the
+         unused modes together with used pins)
 
 The pin list is read from the empty design's fitter report ("All Package
 Pins"), so no Quartus-derived table lives in the repo.
@@ -151,6 +153,8 @@ def main():
         qsf.append(f"set_instance_assignment -name {a} ON -to {port}")
     if campaign == "unused":
         qsf.append(f'set_global_assignment -name RESERVE_ALL_UNUSED_PINS "{UNUSED_MODES[seed % len(UNUSED_MODES)]}"')
+    if campaign == "mixu":
+        qsf.append(f'set_global_assignment -name RESERVE_ALL_UNUSED_PINS "{rng.choice(UNUSED_MODES)}"')
     if not inst:
         # Same design as the empty baseline, so only the unused-pin mode
         # differs from it.
