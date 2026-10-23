@@ -14,7 +14,7 @@ use std::path::Path;
 use ddb::device::{Device, Node};
 
 use crate::chipdb::element_name;
-use crate::io::{IoDb, OutData, PinUse, Role, Standard, UnusedPins, BLOCK_CLK_N, BLOCK_CLK_P, BLOCK_COL};
+use crate::io::{Dir, Input, IoDb, OutData, Output, OutputEnable, PinUse, Standard, UnusedPins, BLOCK_CLK_N, BLOCK_CLK_P, BLOCK_COL};
 use crate::logic::{clock_slots, Aclr, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic, Lut, Reg, Sload};
 use crate::phys::{PhysDesign, Pip, RoutedNet};
 
@@ -27,8 +27,8 @@ enum Wire {
     LocalLine { x: u32, y: u32, k: u32 },
     /// A pin of LE k (LUT input A..D, COMB, Q, CLK).
     Le { x: u32, y: u32, k: u32, pin: LePin },
-    /// Output data / pad-to-core of the I/O element at logic tile (x, y),
-    /// bel z.
+    /// Output data / output enable / pad-to-core of the I/O element at
+    /// logic tile (x, y), bel z.
     Ioe { x: u32, y: u32, z: u32, pin: IoePin },
     ClkIn { g: u32 },
     /// LAB control line k (rcf LAB_CONTROL_MUX).
@@ -52,6 +52,7 @@ enum LePin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum IoePin {
     DataOut,
+    Oe,
     CombOut,
 }
 
@@ -153,6 +154,7 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
         if let Some(z) = num(bel, "IOE") {
             let pin = match pin {
                 "DATAOUT" => IoePin::DataOut,
+                "OE" => IoePin::Oe,
                 "COMBOUT" => IoePin::CombOut,
                 _ => bail!("wire {name}"),
             };
@@ -304,6 +306,7 @@ impl Routed {
         let mut pia: HashMap<(u32, u32, u32), LeSource> = HashMap::new();
         let mut clk_in: HashMap<u32, u8> = HashMap::new();
         let mut data_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
+        let mut oe_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut datain: HashMap<(u32, u32, u32), [bool; 2]> = HashMap::new();
         let mut nets = Vec::new();
         for n in self.nets.values() {
@@ -365,9 +368,11 @@ impl Routed {
                         let t = &dev.routing.templates[dev.routing.elements[s.0 as usize].template as usize];
                         clk_in.insert(g, t.index as u8);
                     }
-                    (Wire::Node(s), Wire::Ioe { x, y, z, pin: IoePin::DataOut }) => {
+                    (Wire::Node(s), Wire::Ioe { x, y, z, pin: pin @ (IoePin::DataOut | IoePin::Oe) }) => {
                         let t = &dev.routing.templates[dev.routing.elements[s.0 as usize].template as usize];
-                        data_line.insert((x, y, z), t.index as u32);
+                        ensure!(t.element_enum == 276, "{}: pin {pin:?} from {}", n.name, element_name(t.element_enum));
+                        let m = if pin == IoePin::Oe { &mut oe_line } else { &mut data_line };
+                        m.insert((x, y, z), t.index as u32);
                     }
                     (Wire::Ioe { x, y, z, pin: IoePin::CombOut }, Wire::Node(d)) => {
                         let t = &dev.routing.templates[dev.routing.elements[d.0 as usize].template as usize];
@@ -417,27 +422,44 @@ impl Routed {
                     let input = *clk_in.get(&g).with_context(|| format!("{name}: input not routed"))?;
                     clkctrls.push(ClkCtrl { g: g as u8, input });
                 }
-                ("CY2_IBUF" | "CY2_OBUF", Bel::Ioe { x, y, z }) => {
+                ("CY2_IBUF" | "CY2_OBUF" | "CY2_IOBUF", Bel::Ioe { x, y, z }) => {
                     let p = pin_at(io, x, y, z)?;
-                    let out = c.ty == "CY2_OBUF";
+                    let input = Input { comb: datain.get(&(x, y, z)).copied().unwrap_or_default(), reg: None };
+                    let data = || -> Result<OutData> {
+                        Ok(match (c.params.get("OUT_CONST"), data_line.get(&(x, y, z))) {
+                            (Some(v), _) => OutData::Const(v.ends_with('1')),
+                            (None, Some(&line)) => OutData::Line { line, inverted: flag(c, "DATA_INVERT"), reg: None },
+                            _ => bail!("{name}: output data neither routed nor constant"),
+                        })
+                    };
+                    let dir = match c.ty.as_str() {
+                        "CY2_IBUF" => Dir::In(input),
+                        "CY2_OBUF" => Dir::Out(Output { drive: None, data: data()?, enable: OutputEnable::Always }),
+                        _ => {
+                            let output = match (c.params.get("OE_CONST"), oe_line.get(&(x, y, z))) {
+                                (Some(v), _) if v.ends_with('1') => Output { drive: None, data: data()?, enable: OutputEnable::Always },
+                                // Never driven: what Quartus makes of such
+                                // an inout, an open drain releasing the pad.
+                                (Some(_), _) => Output { drive: None, data: OutData::Const(true), enable: OutputEnable::OpenDrain },
+                                (None, Some(&line)) => Output {
+                                    drive: None,
+                                    data: data()?,
+                                    enable: OutputEnable::Line { line, inverted: flag(c, "OE_INVERT"), reg: None },
+                                },
+                                (None, None) => bail!("{name}: output enable neither routed nor constant"),
+                            };
+                            // An output-only tri-state pin keeps its input
+                            // buffer off, as Quartus' `output` mode does.
+                            if c.conns.contains_key("COMBOUT") { Dir::Bidir(input, output) } else { Dir::Out(output) }
+                        }
+                    };
                     pins.push(PinUse {
                         pin: p.name.clone(),
                         port: c.attrs.get("PORT").cloned().unwrap_or_default(),
-                        role: if out { Role::Out } else { Role::In },
                         standard: Standard::Lvttl33,
-                        drive: None,
                         pull_up: false,
                         bus_hold: false,
-                        data: match (c.params.get("OUT_CONST"), data_line.get(&(x, y, z))) {
-                            (Some(v), _) => Some(OutData::Const(v.ends_with('1'))),
-                            (None, Some(&line)) => Some(OutData::Line { line, inverted: c.params.get("DATA_INVERT").is_some_and(|v| v.ends_with('1')) }),
-                            _ => None,
-                        },
-                        oe_line: None,
-                        datain_used: datain.get(&(x, y, z)).copied().unwrap_or_default(),
-                        in_reg: None,
-                        out_reg: None,
-                        oe_reg: false,
+                        dir,
                     });
                 }
                 (t, b) => bail!("{name}: cell type {t} on {b:?}"),
@@ -524,6 +546,7 @@ fn resource(dev: &Device, w: Wire, ioe_out_x: impl Fn(u32, u32, u32) -> u32) -> 
         Wire::LocalLine { x, y, k } => Some(format!("LOCAL_LINE:X{x}Y{y}S0I{k}")),
         Wire::Ctrl { x, y, k } => Some(format!("LAB_CONTROL_MUX:X{x}Y{y}S0I{k}")),
         Wire::Ioe { x, y, z, pin: IoePin::DataOut } => Some(format!("IO_DATAOUT:X{}Y{y}S{}I0", ioe_out_x(x, y, z), z % 8)),
+        Wire::Ioe { x, y, z, pin: IoePin::Oe } => Some(format!("IO_OE_PIN:X{}Y{y}S{}I0", ioe_out_x(x, y, z), z % 8)),
         _ => None,
     }
 }
@@ -565,7 +588,7 @@ impl Routed {
                     ("LCELL_COMB", "COUT") => format!("{a}_cout"),
                     ("LCELL_FF", "REGOUT") => format!("{a}_regout"),
                     ("CLKCTRL", "OUTCLK") => format!("{a}_outclk"),
-                    ("CY2_IBUF", "COMBOUT") => a.clone(),
+                    ("CY2_IBUF" | "CY2_IOBUF", "COMBOUT") => a.clone(),
                     _ => continue,
                 };
                 driver.insert(id, sig);
@@ -623,10 +646,17 @@ impl Routed {
         let sig_of = |c: &Cell, p: &str| -> Option<String> { c.conns.get(p).and_then(|id| driver.get(id)).cloned() };
 
         // Netlist.
-        let mut ports: BTreeMap<String, (bool, Option<u32>)> = BTreeMap::new();
+        let mut ports: BTreeMap<String, (&str, Option<u32>)> = BTreeMap::new();
         for (name, p) in &port_of {
             let (b, i) = split_port(p);
-            let e = ports.entry(b.to_string()).or_insert((self.cells[*name].ty == "CY2_OBUF", None));
+            let c = &self.cells[*name];
+            let dir = match c.ty.as_str() {
+                "CY2_IBUF" => "input",
+                "CY2_IOBUF" if c.conns.contains_key("COMBOUT") => "inout",
+                _ => "output",
+            };
+            let e = ports.entry(b.to_string()).or_insert((dir, None));
+            ensure!(e.0 == dir, "port {b} mixes {} and {dir} bits", e.0);
             if let Some(i) = i {
                 e.1 = Some(e.1.map_or(i, |m: u32| m.max(i)));
             }
@@ -636,7 +666,7 @@ impl Routed {
         writeln!(v, "module top({});", ports.keys().map(|p| vid(p)).collect::<Vec<_>>().join(", "))?;
         for (p, (out, w)) in &ports {
             let r = w.map(|m| format!("[{m}:0] ")).unwrap_or_default();
-            writeln!(v, "{} {r}{};", if *out { "output" } else { "input" }, vid(p))?;
+            writeln!(v, "{out} {r}{};", vid(p))?;
         }
         let feeder_outs: std::collections::HashSet<&String> =
             feeder.keys().filter_map(|n| self.cells[*n].conns.get("COMBOUT").and_then(|id| driver.get(id))).collect();
@@ -713,11 +743,22 @@ impl Routed {
                 Bel::Ioe { x, y, z } => {
                     let p = &atom[name.as_str()];
                     writeln!(qsf, "set_location_assignment PIN_{} -to {p}", pin_at(io, x, y, z)?.name)?;
-                    if c.ty == "CY2_OBUF" {
-                        let inv = if c.params.get("DATA_INVERT").is_some_and(|v| v.ends_with('1')) { "~" } else { "" };
+                    if c.ty != "CY2_IBUF" {
+                        let inv = if flag(c, "DATA_INVERT") { "~" } else { "" };
                         let d = match c.params.get("OUT_CONST") {
                             Some(k) => if k.ends_with('1') { "1'b1".to_string() } else { "1'b0".to_string() },
                             None => format!("{inv}{}", net(c, "DATAOUT", "1'b0")),
+                        };
+                        // quartus_map folds the inverters into the IOE, as it
+                        // does for Verilog (IO_DATA_INVERT, IO_OE_INVERT).
+                        let d = match (c.ty.as_str(), c.params.get("OE_CONST")) {
+                            ("CY2_OBUF", _) => d,
+                            (_, Some(k)) if k.ends_with('1') => d,
+                            (_, Some(_)) => bail!("{name}: an inout that never drives isn't exported"),
+                            (_, None) => {
+                                let inv = if flag(c, "OE_INVERT") { "~" } else { "" };
+                                format!("{inv}{} ? {d} : 1'bz", net(c, "OE", "1'b0"))
+                            }
                         };
                         writeln!(v, "assign {} = {d};", vid(p))?;
                     }
@@ -747,7 +788,7 @@ impl Routed {
         // otherwise picks per destination.
         for (name, c) in &self.cells {
             let Bel::Ioe { z, .. } = c.bel else { continue };
-            if c.ty != "CY2_IBUF" || z >= 8 {
+            if !matches!(c.ty.as_str(), "CY2_IBUF" | "CY2_IOBUF") || z >= 8 {
                 continue;
             }
             let Some(id) = c.conns.get("COMBOUT") else { continue };
@@ -781,9 +822,10 @@ impl Routed {
                         seen(&d, &mut order);
                         kids.entry(s).or_default().push(d.clone());
                         has_parent.insert(d.clone());
-                        if let Wire::Ioe { x, y, z, .. } = p.dst {
+                        if let Wire::Ioe { x, y, z, pin } = p.dst {
                             let c = cell_at.get(&Bel::Ioe { x, y, z }).context("output pin cell")?;
-                            dests.entry(d).or_default().push(format!("dest = ( {}, DATAIN );", atom[*c]));
+                            let port = if pin == IoePin::Oe { "OE" } else { "DATAIN" };
+                            dests.entry(d).or_default().push(format!("dest = ( {}, {port} );", atom[*c]));
                         }
                     }
                     // Into the net's first resource from its driver's pin.

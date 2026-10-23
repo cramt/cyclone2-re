@@ -38,6 +38,9 @@ mod arch {
     pub const IO_SELECT_IOST_DIRT: i32 = 96;
     pub const IO_PIA_TO_OE: i32 = 105;
     pub const IO_REG_FEEDS_PIN_OUT_YGR: i32 = 109;
+    pub const IO_INREG_POWERS_UP_HIGH: i32 = 113;
+    pub const IO_OEREG_POWERS_UP_HIGH: i32 = 114;
+    pub const IO_OUTREG_POWERS_UP_HIGH: i32 = 115;
     pub const IO_INREG_CLK_FAST_MUX: i32 = 89;
     pub const IO_OUTREG_CLK_FAST_MUX: i32 = 93;
     pub const IO_DATA_INVERT: i32 = 118;
@@ -303,19 +306,112 @@ impl Standard {
     }
 }
 
+/// An I/O-cell register (no clear, no clock enable: those aren't modelled).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    In,
-    Out,
-    Bidir,
+pub struct IoReg {
+    /// The I/O row clock buffer (`BLK_CLK_BUF` index) that clocks it.
+    pub clock: u32,
+    /// Power-up value 1 (`*_power_up = "high"`): what Quartus uses to
+    /// move an inverter from after the register to before it.
+    pub powers_up_high: bool,
 }
 
-/// An output's data: a LAB-local line into the IOE's data mux, optionally
-/// inverted in the IOE, or a constant.
+/// An output's data: a LAB-local line into the IOE's data mux (optionally
+/// inverted in the IOE, optionally through the output register), or a
+/// constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutData {
-    Line { line: u32, inverted: bool },
+    Line { line: u32, inverted: bool, reg: Option<IoReg> },
     Const(bool),
+}
+
+/// When the output buffer drives the pad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputEnable {
+    /// Always (the netlist's `oe` is vcc): a plain output.
+    Always,
+    /// Open drain (`open_drain_output`): the buffer only ever pulls low; a
+    /// data 1 releases the pad. Quartus also makes an inout that is never
+    /// driven an open drain with data 1.
+    OpenDrain,
+    /// Never (`oe` is gnd: the enable folded to a constant 0).
+    Never,
+    /// Tri-state: a LAB-local line into the IOE's OE mux, optionally
+    /// inverted in the IOE, optionally through the OE register (which
+    /// shares the output register's clock).
+    Line { line: u32, inverted: bool, reg: Option<IoReg> },
+}
+
+/// Core-to-pad side of a pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Output {
+    /// mA; `None`: the standard's default.
+    pub drive: Option<u32>,
+    pub data: OutData,
+    pub enable: OutputEnable,
+}
+
+impl Output {
+    /// The I/O row clock buffer of the output-side registers. The output
+    /// and OE registers share one clock mux (`IO_OUTREG_CLK_FAST_MUX`), so
+    /// two different clocks are an error.
+    pub fn clock(&self) -> Result<Option<u32>> {
+        let d = match self.data {
+            OutData::Line { reg, .. } => reg.map(|r| r.clock),
+            OutData::Const(_) => None,
+        };
+        let e = match self.enable {
+            OutputEnable::Line { reg, .. } => reg.map(|r| r.clock),
+            _ => None,
+        };
+        match (d, e) {
+            (Some(a), Some(b)) => {
+                ensure!(a == b, "output register on clock buffer {a}, OE register on {b}: they share one clock");
+                Ok(Some(a))
+            }
+            (a, b) => Ok(a.or(b)),
+        }
+    }
+}
+
+/// Pad-to-core side of a pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Input {
+    /// Which of the two pad-to-core paths (`IO_DATAIN` index) carry the
+    /// pad itself into the core.
+    pub comb: [bool; 2],
+    pub reg: Option<InReg>,
+}
+
+/// The input register and the pad-to-core paths that carry its output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InReg {
+    pub reg: IoReg,
+    pub paths: [bool; 2],
+}
+
+/// What a used pin does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dir {
+    In(Input),
+    /// Output only: the input buffer is off.
+    Out(Output),
+    Bidir(Input, Output),
+}
+
+impl Dir {
+    pub fn input(&self) -> Option<&Input> {
+        match self {
+            Dir::In(i) | Dir::Bidir(i, _) => Some(i),
+            Dir::Out(_) => None,
+        }
+    }
+    pub fn output(&self) -> Option<&Output> {
+        match self {
+            Dir::Out(o) | Dir::Bidir(_, o) => Some(o),
+            Dir::In(_) => None,
+        }
+    }
 }
 
 /// How the design uses one pin.
@@ -323,25 +419,10 @@ pub enum OutData {
 pub struct PinUse {
     pub pin: String,
     pub port: String,
-    pub role: Role,
     pub standard: Standard,
-    /// mA, outputs and bidirs only.
-    pub drive: Option<u32>,
     pub pull_up: bool,
     pub bus_hold: bool,
-    /// What the output drives (outputs and bidirs).
-    pub data: Option<OutData>,
-    /// LAB-local line into the output enable mux.
-    pub oe_line: Option<u32>,
-    /// Which of the two pad-to-core paths (`IO_DATAIN` index) the input
-    /// drives the core through.
-    pub datain_used: [bool; 2],
-    /// I/O-cell registers, each with the I/O row clock buffer
-    /// (`BLK_CLK_BUF` index) that clocks it. The OE register shares the
-    /// output clock.
-    pub in_reg: Option<u32>,
-    pub out_reg: Option<u32>,
-    pub oe_reg: bool,
+    pub dir: Dir,
 }
 
 /// `set_instance_assignment -name <NAME> ON -to <port>` in a qsf.
@@ -391,58 +472,64 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
     for a in atoms.iter().filter(|a| a.kind == "io") {
         let pin = a.loc.strip_prefix("PIN_").with_context(|| format!("{}: location {}", a.name, a.loc))?.to_string();
         let port = a.port("padio").with_context(|| format!("{}: no padio", a.name))?.to_string();
-        let role = match a.params.get("operation_mode").map(String::as_str) {
-            Some("input") => Role::In,
-            Some("output") => Role::Out,
-            Some("bidir") => Role::Bidir,
-            m => bail!("{}: operation_mode {m:?}", a.name),
-        };
         let standard = Standard::parse(a.note("I/O Standard").with_context(|| format!("{}: no I/O standard", a.name))?)?;
-        let drive = match a.note("Current Strength") {
-            None | Some("Default") => None,
-            Some(s) => Some(s.strip_suffix("mA").and_then(|n| n.parse().ok()).with_context(|| format!("{}: current {s}", a.name))?),
-        };
-        let reg = |mode: &str| a.params.get(mode).is_some_and(|m| m == "register");
         for p in ["areset", "sreset"] {
             ensure!(a.net(p).is_none(), "{}: I/O register {p} isn't modelled", a.name);
         }
         for p in ["inclkena", "outclkena"] {
             ensure!(a.port(p) == Some("vcc"), "{}: I/O register {p} isn't modelled", a.name);
         }
-        let clock = |c: &str| clocks.get(&(port.clone(), c.to_string())).copied().with_context(|| format!("{}: {c} not in the rcf", a.name));
-        let in_reg = if reg("input_register_mode") { Some(clock("INCLK")?) } else { None };
-        let out_reg = if reg("output_register_mode") { Some(clock("OUTCLK")?) } else { None };
-        let oe_reg = reg("oe_register_mode");
-        ensure!(!oe_reg || out_reg.is_some(), "{}: OE register without output register isn't modelled", a.name);
-        // `!net`: the IOE inverts (quartus_map moves inverters feeding
-        // pins into it).
-        let data = match (a.port("datain"), lines.get(&(port.clone(), "DATAIN".into()))) {
-            (Some("gnd"), _) => Some(OutData::Const(false)),
-            (Some("vcc"), _) => Some(OutData::Const(true)),
-            (d, Some(&line)) => Some(OutData::Line { line, inverted: d.is_some_and(|d| d.starts_with('!')) }),
-            _ => None,
+        // `which`: input, output or oe; `clk`: the rcf sink of its clock.
+        let reg = |which: &str, clk: &str| -> Result<Option<IoReg>> {
+            if a.params.get(&format!("{which}_register_mode")).is_none_or(|m| m != "register") {
+                return Ok(None);
+            }
+            let clock = *clocks.get(&(port.clone(), clk.to_string())).with_context(|| format!("{}: {clk} not in the rcf", a.name))?;
+            Ok(Some(IoReg { clock, powers_up_high: a.params.get(&format!("{which}_power_up")).is_some_and(|v| v == "high") }))
         };
-        out.push(PinUse {
-            pin,
-            role,
-            standard,
-            drive,
-            pull_up: pull.contains(&port),
-            bus_hold: hold.contains(&port),
-            data,
-            oe_line: lines.get(&(port.clone(), "OE".into())).copied(),
-            // The rcf names the input's core net: the pin itself for a
-            // combinational input, the register output for a registered one.
-            datain_used: [Some(port.as_str()), a.net("regout"), a.net("combout")]
-                .into_iter()
-                .flatten()
-                .filter_map(|n| datain.get(n))
-                .fold([false; 2], |acc, d| [acc[0] | d[0], acc[1] | d[1]]),
-            port,
-            in_reg,
-            out_reg,
-            oe_reg,
-        });
+        let input = || -> Result<Input> {
+            // The rcf names the input's core net: the pin itself (or the
+            // netlist's combout net) for the pad, the register output for
+            // the register.
+            let paths = |nets: &[Option<&str>]| {
+                nets.iter().flatten().filter_map(|n| datain.get(*n)).fold([false; 2], |acc, d| [acc[0] | d[0], acc[1] | d[1]])
+            };
+            let comb = paths(&[Some(port.as_str()), a.net("combout")]);
+            let reg = reg("input", "INCLK")?.map(|reg| InReg { reg, paths: paths(&[a.net("regout")]) });
+            Ok(Input { comb, reg })
+        };
+        let output = || -> Result<Output> {
+            let drive = match a.note("Current Strength") {
+                None | Some("Default") => None,
+                Some(s) => Some(s.strip_suffix("mA").and_then(|n| n.parse().ok()).with_context(|| format!("{}: current {s}", a.name))?),
+            };
+            // `!net`: the IOE inverts (quartus_map moves inverters feeding
+            // pins, and an OE's, into it).
+            let data_reg = reg("output", "OUTCLK")?;
+            let data = match (a.port("datain"), lines.get(&(port.clone(), "DATAIN".into()))) {
+                (Some(c @ ("gnd" | "vcc")), _) if data_reg.is_none() => OutData::Const(c == "vcc"),
+                (d, Some(&line)) => OutData::Line { line, inverted: d.is_some_and(|d| d.starts_with('!')), reg: data_reg },
+                (d, _) => bail!("{}: output data {d:?} neither routed nor constant (registered {})", a.name, data_reg.is_some()),
+            };
+            let open_drain = a.params.get("open_drain_output").is_some_and(|v| v == "true");
+            let oe_reg = reg("oe", "OUTCLK")?;
+            let enable = match (a.port("oe"), lines.get(&(port.clone(), "OE".into()))) {
+                (Some("vcc"), _) if oe_reg.is_none() => if open_drain { OutputEnable::OpenDrain } else { OutputEnable::Always },
+                (Some("gnd"), _) if oe_reg.is_none() && !open_drain => OutputEnable::Never,
+                (oe, Some(&line)) if !open_drain => OutputEnable::Line { line, inverted: oe.is_some_and(|o| o.starts_with('!')), reg: oe_reg },
+                (oe, _) => bail!("{}: output enable {oe:?} (open drain {open_drain}, registered {}) isn't modelled", a.name, oe_reg.is_some()),
+            };
+            let o = Output { drive, data, enable };
+            o.clock().with_context(|| a.name.clone())?;
+            Ok(o)
+        };
+        let dir = match a.params.get("operation_mode").map(String::as_str) {
+            Some("input") => Dir::In(input()?),
+            Some("output") => Dir::Out(output()?),
+            Some("bidir") => Dir::Bidir(input()?, output()?),
+            m => bail!("{}: operation_mode {m:?}", a.name),
+        };
+        out.push(PinUse { pin, standard, pull_up: pull.contains(&port), bus_hold: hold.contains(&port), dir, port });
     }
     Ok(out)
 }
@@ -565,27 +652,37 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
     use arch::*;
     let mut v: Vec<Setting> = Vec::new();
     if matches!(block, BLOCK_ROW | BLOCK_COL) {
-        // Pin mode: an OE register selects mode code 0 instead of 1
-        // (asmdb map 1,1,1,3,3,0,2; which setting is which is unknown).
-        v.push((IO_PIN_MODE, -1, if u.oe_reg { &[0, 0] } else { &[1, 0] }));
+        // Pin mode, two bits (asmdb map 1,1,1,3,3,0,2): bit 0 is a
+        // combinational OE (0: the OE register drives it), bit 1 open
+        // drain. Inputs and unused pins read 10.
+        let oe_reg = matches!(u.dir.output().map(|o| o.enable), Some(OutputEnable::Line { reg: Some(_), .. }));
+        let open_drain = matches!(u.dir.output().map(|o| o.enable), Some(OutputEnable::OpenDrain));
+        v.push((IO_PIN_MODE, -1, if oe_reg { &[0, 0] } else if open_drain { &[1, 1] } else { &[1, 0] }));
         v.extend([
             (IO_SET_CE_TO_OEREG_TIE_OFF, -1, &[1][..]),
             (IO_SET_CE_TO_OUTREG_TIE_OFF, -1, &[1][..]),
         ]);
-        if u.role == Role::In {
+        // An input's output buffer is held off by the inverter after its
+        // (unselected) OE mux; a tri-state output inverts its OE there.
+        let oe_invert = match u.dir.output().map(|o| o.enable) {
+            None | Some(OutputEnable::Never) => true,
+            Some(OutputEnable::Line { inverted, .. }) => inverted,
+            Some(OutputEnable::Always | OutputEnable::OpenDrain) => false,
+        };
+        if oe_invert {
             v.push((IO_OE_INVERT, -1, &[1]));
         }
         // Set on every used pin except outputs below 3.3 V (observed on
         // 2.5, 1.8 and 1.5 V; the name suggests duty-cycle correction).
         let low_v = matches!(u.standard, Standard::V25 | Standard::V18 | Standard::V15);
-        if u.role == Role::In || !low_v {
+        if matches!(u.dir, Dir::In(_)) || !low_v {
             v.push((IO_USE_OUTPUT_DUTY_CYCLE, -1, &[1, 1]));
         }
-        if u.role != Role::In {
+        if let Some(o) = u.dir.output() {
             // The netlist names the current of every output; "Default" is
             // only seen on 3.3-V LVTTL, where it is 24 mA. (Other
             // standards' defaults differ between row and column IOEs.)
-            let ma = match (u.drive, u.standard) {
+            let ma = match (o.drive, u.standard) {
                 (Some(ma), _) => ma,
                 (None, Standard::Lvttl33) => 24,
                 (None, s) => bail!("{}: {s:?} output with no current strength", u.pin),
@@ -593,26 +690,33 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
             let code = drive_code(block, u.standard, ma)
                 .with_context(|| format!("{}: no drive code for {:?} at {ma} mA", u.pin, u.standard))?;
             v.push((IO_SET_DRIVE_STRENGTH_ARMSTRONG, -1, code));
-            match u.data {
+            match o.data {
                 // Observed on the empty design's LED tied to 0.
-                Some(OutData::Const(false)) => v.push((IO_DATA_INVERT, -1, &[1])),
+                OutData::Const(false) => v.push((IO_DATA_INVERT, -1, &[1])),
                 // An unselected data mux drives 0, so a 1 needs no
                 // inversion; observed on bidirs whose data folded to vcc.
-                Some(OutData::Const(true)) => {}
-                Some(OutData::Line { inverted, .. }) => {
+                OutData::Const(true) => {}
+                OutData::Line { inverted, .. } => {
                     if inverted {
                         v.push((IO_DATA_INVERT, -1, &[1]));
                     }
                 }
-                None => bail!("{}: output data neither routed nor constant", u.pin),
             }
         }
         // Each pad-to-core path the input drives turns on its delay
-        // setting (observed: 287 of 287 routed inputs; unrouted inputs 0),
-        // with the third bit set when the path starts at the input register.
-        for (k, &on) in u.datain_used.iter().enumerate() {
-            if on {
-                v.push((IO_SET_PAD_TO_CORE_DUAL_FUNC_DELAY_MAG, k as i32, if u.in_reg.is_some() { &[1, 1, 1] } else { &[1, 1, 0] }));
+        // setting (observed: 287 of 287 routed inputs; unrouted inputs 0):
+        // 110 from the pad, 111 from the input register. A path carrying
+        // the pad while the other carries the register stays 000 (observed
+        // on 2 pins).
+        if let Some(i) = u.dir.input() {
+            let reg_paths = i.reg.map_or([false; 2], |r| r.paths);
+            for k in 0..2 {
+                let code: &[u8] = match (i.comb[k], reg_paths[k]) {
+                    (_, true) => &[1, 1, 1],
+                    (true, false) if i.reg.is_none() => &[1, 1, 0],
+                    _ => continue,
+                };
+                v.push((IO_SET_PAD_TO_CORE_DUAL_FUNC_DELAY_MAG, k as i32, code));
             }
         }
         // Registers: no clear (the USE_CLR bits read 1 then), clock from
@@ -627,20 +731,37 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
             &[0, 0, 0, 0, 0, 0, 1],
         ];
         let clk = |b: u32| ONE_HOT.get(b as usize).copied().with_context(|| format!("{}: I/O clock buffer {b}", u.pin));
-        if let Some(b) = u.in_reg {
-            v.push((IO_INREG_CLK_FAST_MUX, -1, clk(b)?));
-            v.push((IO_USE_CLR_INREG, -1, &[1]));
+        // A register powering up 1 sets its POWERS_UP_HIGH bit (observed
+        // on OE registers whose inverter Quartus moved in front of them).
+        let reg = |r: IoReg, use_clr: i32, high: i32| -> Vec<Setting> {
+            let mut s: Vec<Setting> = vec![(use_clr, -1, &[1])];
+            if r.powers_up_high {
+                s.push((high, -1, &[1]));
+            }
+            s
+        };
+        let in_reg = u.dir.input().and_then(|i| i.reg).map(|r| r.reg);
+        if let Some(r) = in_reg {
+            v.extend(reg(r, IO_USE_CLR_INREG, IO_INREG_POWERS_UP_HIGH));
         }
-        if let Some(b) = u.out_reg {
-            v.push((IO_OUTREG_CLK_FAST_MUX, -1, clk(b)?));
-            v.push((IO_USE_CLR_OUTREG, -1, &[1]));
+        let out = u.dir.output();
+        if let Some(OutData::Line { reg: Some(r), .. }) = out.map(|o| o.data) {
+            v.extend(reg(r, IO_USE_CLR_OUTREG, IO_OUTREG_POWERS_UP_HIGH));
             v.push((IO_REG_FEEDS_PIN_OUT_YGR, -1, &[1, 0]));
         }
-        if u.oe_reg {
-            v.push((IO_USE_CLR_OEREG, -1, &[1]));
+        if let Some(OutputEnable::Line { reg: Some(r), .. }) = out.map(|o| o.enable) {
+            v.extend(reg(r, IO_USE_CLR_OEREG, IO_OEREG_POWERS_UP_HIGH));
+        }
+        if let Some(r) = in_reg {
+            v.push((IO_INREG_CLK_FAST_MUX, -1, clk(r.clock)?));
+        }
+        // The output and OE registers share the output clock mux; an OE
+        // register alone sets it too (observed on oereg pins).
+        if let Some(b) = out.map(Output::clock).transpose().with_context(|| u.pin.clone())?.flatten() {
+            v.push((IO_OUTREG_CLK_FAST_MUX, -1, clk(b)?));
         }
     } else {
-        ensure!(u.role == Role::In, "{}: dedicated clock pin used as {:?}", u.pin, u.role);
+        ensure!(matches!(u.dir, Dir::In(_)), "{}: dedicated clock pin used as {:?}", u.pin, u.dir);
     }
     // Input buffer select: an output-only pin has it switched off the same
     // way an unused one does; 1.8 V and 1.5 V inputs use the low-voltage
@@ -648,8 +769,8 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
     v.push((
         IO_SELECT_IOST_DIRT,
         -1,
-        match (u.role, u.standard) {
-            (Role::Out, _) => &[1, 1, 0],
+        match (u.dir, u.standard) {
+            (Dir::Out(_), _) => &[1, 1, 0],
             (_, s) if s.low_voltage_input() => &[0, 1, 0],
             _ => &[0, 0, 0],
         },
@@ -702,12 +823,16 @@ impl IoDb {
                     }
                 }
             }
-            if let Some(u) = u {
-                let data_line = match u.data {
-                    Some(OutData::Line { line, .. }) => Some(line),
+            if let Some(o) = u.and_then(|u| u.dir.output()) {
+                let data_line = match o.data {
+                    OutData::Line { line, .. } => Some(line),
+                    OutData::Const(_) => None,
+                };
+                let oe_line = match o.enable {
+                    OutputEnable::Line { line, .. } => Some(line),
                     _ => None,
                 };
-                for (a, line) in [(arch::IO_DATA_INPUT, data_line), (arch::IO_PIA_TO_OE, u.oe_line)] {
+                for (a, line) in [(arch::IO_DATA_INPUT, data_line), (arch::IO_PIA_TO_OE, oe_line)] {
                     let Some(line) = line else { continue };
                     let m = self.muxes.get(&(p.ioe.block, a)).with_context(|| format!("{}: no source mux {a}", p.name))?;
                     for f in m.bits(p.ioe.path, line).with_context(|| format!("{}: line {line}", p.name))? {
@@ -725,16 +850,27 @@ impl IoDb {
     /// LAB-local lines (of the IOE's output tile) the output data mux can
     /// select. Empty for blocks without one (dedicated clock inputs).
     pub fn data_sources(&self, p: &Pin) -> Vec<u32> {
-        let Some(m) = self.muxes.get(&(p.ioe.block, arch::IO_DATA_INPUT)) else { return vec![] };
+        self.sources(p, arch::IO_DATA_INPUT)
+    }
+
+    /// LAB-local lines the output enable mux can select (the same tile's
+    /// lines as the data mux: rcf `IO_OE_PIN` sits beside `IO_DATAOUT`).
+    pub fn oe_sources(&self, p: &Pin) -> Vec<u32> {
+        self.sources(p, arch::IO_PIA_TO_OE)
+    }
+
+    fn sources(&self, p: &Pin, arch: i32) -> Vec<u32> {
+        let Some(m) = self.muxes.get(&(p.ioe.block, arch)) else { return vec![] };
         (0..m.sel.len() as u32).filter(|&l| m.bits(p.ioe.path, l).is_ok()).collect()
     }
 
-    /// Which pin and feature (arch type, group) own a bit (debugging aid).
-    pub fn describe(&self, bit: IoBit) -> Option<(String, i32, i32)> {
+    /// Which pin, feature (arch type, group) and position in that feature
+    /// own a bit (debugging aid).
+    pub fn describe(&self, bit: IoBit) -> Option<(String, i32, i32, usize)> {
         for p in self.pins.values() {
             for ((a, i), bits) in self.footprint(p.ioe) {
-                if bits.contains(&Some(bit)) {
-                    return Some((p.name.clone(), a, i));
+                if let Some(k) = bits.iter().position(|b| *b == Some(bit)) {
+                    return Some((p.name.clone(), a, i, k));
                 }
             }
         }

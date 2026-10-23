@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Build one output-enable / bidir fuzz design end to end: generate, compile,
+# back-annotate routing (top.rcf) and placement (top.qsf), post-fit netlist.
+#
+#   tools/oe_fuzz.sh <out-dir> <seed> [fraction]
+set -euo pipefail
+root="$(dirname "$(realpath "$0")")/.."
+dir=$1; shift
+"$root/tools/gen_oe.py" "$dir" "$@"
+"$root/tools/oracle.sh" "$dir" > "$dir.log" 2>&1 || { echo "$dir: oracle failed"; tail -5 "$dir.log"; exit 1; }
+(cd "$root" && just back-annotate "$dir" && just netlist "$dir") >> "$dir.log" 2>&1
+echo "$dir: ok"
