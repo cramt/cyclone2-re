@@ -239,7 +239,7 @@ impl Db {
     }
 
     fn new(dev: Device, asmdb: Asmdb, pins: &[Pin]) -> Result<Db> {
-        Ok(Db { lab: LabDb::new(&asmdb)?, io: IoDb::new(pins, &asmdb)?, dev, asmdb })
+        Ok(Db { lab: LabDb::new(&asmdb)?, io: IoDb::new(pins, &asmdb)?, m4k: crate::m4k::M4kDb::new(&asmdb)?, dev, asmdb })
     }
 
     /// The shipped database in `dir` (a device directory such as

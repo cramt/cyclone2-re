@@ -9,7 +9,7 @@ use ddb::device::Device;
 
 use crate::logic::Logic;
 use crate::phys::PhysDesign;
-use crate::{io, rcf, route, vo};
+use crate::{io, m4k, rcf, route, vo};
 
 pub struct Loaded {
     pub design: PhysDesign,
@@ -28,5 +28,9 @@ pub fn load(dev: &Device, dir: &Path) -> Result<Loaded> {
     let qsf = std::fs::read_to_string(dir.join("build/top.qsf")).context("back-annotated qsf")?;
     let pins = io::pin_uses(&atoms, &sigs, &qsf)?;
     let unused_pins = io::UnusedPins::from_qsf(&qsf)?;
-    Ok(Loaded { design: PhysDesign { logic, pins, unused_pins, nets }, unmodelled, skipped_resources: skipped.len() })
+    let rcf_text = std::fs::read_to_string(dir.join("build/top.rcf"))?;
+    let (m4ks, ram_unmodelled) = m4k::from_quartus(&atoms, &sigs, &rcf_text)?;
+    let mut unmodelled = unmodelled;
+    unmodelled.extend(ram_unmodelled);
+    Ok(Loaded { design: PhysDesign { logic, pins, unused_pins, m4ks, nets }, unmodelled, skipped_resources: skipped.len() })
 }

@@ -15,6 +15,7 @@ use ddb::device::{Device, Node};
 use crate::io::{IoBit, IoDb, PinUse, UnusedPins};
 use crate::lab::LabDb;
 use crate::logic::Logic;
+use crate::m4k::{M4k, M4kDb};
 use crate::rbf::{FrameBit, RepBit};
 use crate::addr;
 
@@ -58,6 +59,8 @@ pub struct PhysDesign {
     pub pins: Vec<PinUse>,
     /// What every other user pin does.
     pub unused_pins: UnusedPins,
+    /// M4K RAM blocks in use.
+    pub m4ks: Vec<M4k>,
     pub nets: Vec<RoutedNet>,
 }
 
@@ -70,6 +73,8 @@ pub enum Source {
     Logic,
     /// ddb pad/pkg/asmdb: I/O element configuration of every pin.
     Io,
+    /// ddb asmdb: M4K RAM block configuration and contents.
+    Ram,
 }
 
 /// The CRAM a physical design fixes. Bits not listed keep the base image's
@@ -100,6 +105,7 @@ pub struct Db {
     pub dev: Device,
     pub lab: LabDb,
     pub io: IoDb,
+    pub m4k: M4kDb,
 }
 
 impl PhysDesign {
@@ -117,6 +123,11 @@ impl PhysDesign {
         }
         for (flat, v) in self.logic.bits(&db.lab)? {
             core.push((addr::frame_bit(flat), v, Source::Logic));
+        }
+        for m in &self.m4ks {
+            for (flat, v) in m.bits(&db.m4k)? {
+                core.push((addr::frame_bit(flat), v, Source::Ram));
+            }
         }
         let mut rep = Vec::new();
         for (b, v) in db.io.bits(&self.pins, self.unused_pins)? {

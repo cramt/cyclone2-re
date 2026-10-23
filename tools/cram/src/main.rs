@@ -360,6 +360,9 @@ fn main() -> Result<()> {
             for c in &des.logic.clkctrls {
                 lines.push(format!("{c:?}"));
             }
+            for m in &des.m4ks {
+                lines.push(format!("{m:?}"));
+            }
             for p in &des.pins {
                 let mut p = p.clone();
                 p.port.clear();

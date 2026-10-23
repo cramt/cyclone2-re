@@ -6,6 +6,7 @@ pub mod chipdb;
 pub mod db;
 pub mod lab;
 pub mod logic;
+pub mod m4k;
 pub mod vo;
 pub mod le;
 pub mod io;

@@ -58,6 +58,53 @@ pub mod arch {
     pub const CLKBUF_ENABLE_MODE: i32 = 2339;
     /// Block type of a LAB (`m_group_block_type`).
     pub const BLOCK_LAB: i32 = 18;
+    /// Block type of an M4K RAM block, and its groups.
+    pub const BLOCK_M4K: i32 = 39;
+    pub const RAM_MS_BYTE_ENABLE_INPUT: i32 = 570;
+    pub const RAM_MS_READ_ADDRESS_INPUT: i32 = 572;
+    pub const RAM_MS_WRITE_ADDRESS_INPUT: i32 = 573;
+    pub const RAM_MS_ADDRESS_STALL_INPUT: i32 = 574;
+    pub const RAM_MS_ADDRESS_STALL_INPUT_B: i32 = 575;
+    pub const RAM_MS_DATA_INPUT: i32 = 576;
+    pub const RAM_CE_FAST_MUX: i32 = 578;
+    pub const RAM_CLEAR_FAST_MUX: i32 = 581;
+    pub const RAM_CLOCK_FAST_MUX: i32 = 582;
+    pub const RAM_RE_FAST_MUX: i32 = 583;
+    pub const RAM_WE_FAST_MUX: i32 = 584;
+    pub const RAM_CE_INVERT: i32 = 586;
+    pub const RAM_CLEAR_INVERT: i32 = 587;
+    pub const RAM_CLOCK_INVERT: i32 = 588;
+    pub const RAM_READ_ENABLE_INVERT: i32 = 589;
+    pub const RAM_WRITE_ENABLE_INVERT: i32 = 590;
+    pub const RAM_DATA_WRITE_MODE: i32 = 591;
+    pub const RAM_DATA_WRITE_MODE_B: i32 = 592;
+    pub const RAM_REG_DATA_OUT: i32 = 593;
+    pub const RAM_REG_DATA_OUT_B: i32 = 594;
+    pub const RAM_SELECT_CLK_DATA_OUT: i32 = 599;
+    pub const RAM_SELECT_CLK_DATA_OUT_B: i32 = 600;
+    pub const RAM_SELECT_CLK_READ_ENABLE_READ_ADDRESS_B: i32 = 603;
+    pub const RAM_SELECT_CLK_BYTE_ENABLE_DATA_B: i32 = 604;
+    pub const RAM_ENABLE_CE_INPUT: i32 = 606;
+    pub const RAM_ENABLE_CE_INPUT_B: i32 = 607;
+    pub const RAM_ENABLE_CE_OUTPUT: i32 = 608;
+    pub const RAM_ENABLE_CE_OUTPUT_B: i32 = 609;
+    pub const RAM_SELECT_CLR_BYTE_ENABLE_B: i32 = 616;
+    pub const RAM_SELECT_CLR_DATA_B: i32 = 617;
+    pub const RAM_SELECT_CLR_DATA_OUT: i32 = 618;
+    pub const RAM_SELECT_CLR_DATA_OUT_B: i32 = 619;
+    pub const RAM_SELECT_CLR_READ_ADDRESS_B: i32 = 620;
+    pub const RAM_SELECT_CLR_READ_ENABLE_B: i32 = 621;
+    pub const RAM_USAGE_MODE: i32 = 624;
+    pub const RAM_USE_CLR_DATA_OUT: i32 = 634;
+    pub const RAM_USE_CLR_DATA_OUT_B: i32 = 635;
+    pub const RAM_USE_EXTENDED_WRITE_PULSE_MAGELLAN: i32 = 642;
+    pub const RAM_ENABLE: i32 = 643;
+    pub const RAM_CONTENT_YGR_MEAB: i32 = 645;
+    pub const RAM_USE_TRUE_DUAL_PORT_MODE: i32 = 648;
+    pub const RAM_USE_PACKED_MODE: i32 = 649;
+    pub const RAM_PIA_TO_INPUT_YGR: i32 = 650;
+    pub const RAM_FLOW_THROUGH_MODE: i32 = 651;
+    pub const RAM_FLOW_THROUGH_MODE_B: i32 = 652;
 }
 
 /// Index into `Asmdb::muxes`.

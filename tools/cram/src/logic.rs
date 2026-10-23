@@ -191,6 +191,8 @@ impl Logic {
 
         // Routing facts per LE / LAB, from the rcf.
         let mut inputs: HashMap<(u32, u32, u32), [Option<LeSource>; 4]> = HashMap::new();
+        // LEs whose LUT (not register sdata) takes a routed datac.
+        let mut lut_c_routed: std::collections::HashSet<(u32, u32, u32)> = Default::default();
         let mut ctl: HashMap<(u32, u32, u32), HashMap<String, u8>> = HashMap::new(); // port -> pia
         let mut glob: HashMap<(u32, u32, u32), HashMap<String, u8>> = HashMap::new(); // port -> buf
         let mut outputs: HashMap<(u32, u32, u32), [Option<String>; 3]> = HashMap::new();
@@ -230,6 +232,9 @@ impl Logic {
                             LeSource::Line(r.index as u8)
                         };
                         inputs.entry(loc).or_default()[p] = Some(src);
+                        if p == 2 && d.physical_port() != "SDATA" {
+                            lut_c_routed.insert(loc);
+                        }
                     }
                     "LAB_CONTROL_MUX" => {
                         ctl.entry(loc).or_default().insert(d.port.clone(), r.index as u8);
@@ -300,7 +305,9 @@ impl Logic {
                 // Own register on datac without a routed input: the
                 // register feedback path (counter LSB: `cnt[0]~75`).
                 let own = ff.and_then(|f| f.port("regout"));
-                c.reg_feedback = own.is_some() && comb.port("datac") == own && c.inputs[2].is_none();
+                // The routed datac may carry the register's sdata instead
+                // (packed register with sload high, M4K design d16).
+                c.reg_feedback = own.is_some() && comb.port("datac") == own && !lut_c_routed.contains(&(x, y, le));
             }
             if let Some(ff) = ff {
                 let g = glob.get(&(x, y, le));
@@ -371,6 +378,13 @@ impl Logic {
         }
         for (k, &g) in &outs {
             let input = *ins.get(k).with_context(|| format!("clock control at {k:?} has no CLKBUF_IN"))?;
+            // Only inputs 0/1 (the dedicated clock pins) are seen to select
+            // as their index. A user pin through the clock delay control
+            // arrives on input 6 and selects code 5 (M4K design s8c, one
+            // sample), so the rest are left to the fitter's data.
+            if input > 1 {
+                unmodelled.push(format!("clock control G{g}: input {input} (select code unknown)"));
+            }
             out.clkctrls.push(ClkCtrl { g, input });
         }
         Ok((out, unmodelled))

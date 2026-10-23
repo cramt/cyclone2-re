@@ -490,6 +490,7 @@ impl Routed {
             logic: Logic { les: les.into_values().collect(), clkctrls, labs },
             pins,
             unused_pins: UnusedPins::InputTriStated,
+            m4ks: vec![],
             nets,
         })
     }

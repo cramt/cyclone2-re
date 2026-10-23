@@ -29,7 +29,7 @@ pub struct Feature {
 }
 
 impl Feature {
-    fn from(db: &Asmdb, g: &ArchGroup) -> Self {
+    pub fn from(db: &Asmdb, g: &ArchGroup) -> Self {
         let bits = |m: Option<ddb::asmdb::MuxId>| m.map(|m| db.mux(m).bits.clone()).unwrap_or_default();
         let paths = g.paths().iter().map(|p| p.iter().map(|&m| bits(m)).collect()).collect();
         let d = g.data().first();
