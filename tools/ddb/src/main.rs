@@ -1,4 +1,4 @@
-use ddb::{asm, asmdb, container, export, pdb, pins, routing};
+use ddb::{asm, asmdb, container, dtm, export, pdb, pins, routing, rtiming};
 
 use anyhow::{bail, Result};
 use std::path::PathBuf;
@@ -16,7 +16,14 @@ fn usage() -> ! {
   ddb asmdb-canon <asmdb.ddb>         mux/arch-group/block summary, see verify/README.md
   ddb pins <devinfo> <die> <package>  package pin -> pad -> IOE x,y,z as CSV
                                       (e.g. magellan4 fbga672)
-  ddb pins-trace <pad|pkg ddb>        value stream, see verify/README.md"
+  ddb pins-trace <pad|pkg ddb>        value stream, see verify/README.md
+  ddb dmf <file.dmf.ddb> [names-dir]  every cell delay leaf: node path, key, value
+                                      (ps); names-dir from verify/dbs_enum_strings.py
+  ddb dmf-trace <file.dmf.ddb>        value stream, see verify/README.md
+  ddb route-timing <timing.ddb> <routing.ddb>
+                                      per routing element: x, y, type, length, R, C,
+                                      driver model, loads (CSV)
+  ddb route-timing-trace <timing.ddb> value stream, see verify/README.md"
     );
     std::process::exit(2)
 }
@@ -168,6 +175,78 @@ fn main() -> Result<()> {
                 pins::parse_pad(&d, Some(&mut log))?;
             }
             println!("{}", log.join("\n"));
+        }
+        ("dmf", [f, rest @ ..]) if rest.len() <= 1 => {
+            // One line per leaf: `/`-joined node path, key words, value.
+            use std::io::Write;
+            let d = container::Ddb::open(&PathBuf::from(f))?;
+            let db = dtm::parse(&d, None)?;
+            let names = match rest.first() {
+                Some(dir) => dtm::Names::load(&PathBuf::from(dir))?,
+                None => dtm::Names::default(),
+            };
+            let mut o = std::io::BufWriter::new(std::io::stdout().lock());
+            for (path, leaf) in db.walk() {
+                let p: Vec<String> = path
+                    .iter()
+                    .map(|(e, id)| match e {
+                        dtm::Edge::Child => names.node(*id),
+                        e => format!("{e:?}:{}", names.node(*id)),
+                    })
+                    .collect();
+                let k: Vec<String> = leaf.key.iter().map(|w| names.wrapped(w)).collect();
+                let v = match leaf.value {
+                    dtm::Value::Int(v) => v.to_string(),
+                    dtm::Value::Float(v) => v.to_string(),
+                };
+                writeln!(o, "{}\t{}\t{v}", p.join("/"), k.join(" "))?;
+            }
+        }
+        ("dmf-trace", [f]) => {
+            // Decoded values in PDB_ASCII_DUMP order, for diffing against
+            // verify/dmf_trace_tokens.py.
+            let d = container::Ddb::open(&PathBuf::from(f))?;
+            let mut log = Vec::new();
+            // Print what was read even on failure: the point of divergence
+            // is what one wants to see.
+            let r = dtm::parse(&d, Some(&mut log));
+            println!("{}", log.join("\n"));
+            r?;
+        }
+        ("route-timing", [f, routing_file]) => {
+            use std::io::Write;
+            let t = rtiming::parse(&container::Ddb::open(&PathBuf::from(f))?.body, None)?;
+            let g = routing::parse(&container::Ddb::open(&PathBuf::from(routing_file))?.body)?;
+            anyhow::ensure!(t.node_simple_info.len() == g.elements.len(), "timing and routing element counts differ");
+            let mut o = std::io::BufWriter::new(std::io::stdout().lock());
+            writeln!(o, "node,x,y,element_enum,z,index,length,r_per_um,c_per_um,driver_pos,driver_model,load_base,loads")?;
+            let mut out_of_range = 0usize;
+            for (i, e) in g.elements.iter().enumerate() {
+                let tpl = &g.templates[e.template as usize];
+                let si = &t.simple_info[t.node_simple_info[i] as usize];
+                let (dp, dm) = si.drivers.first().map_or((-1, -1), |d| (d.pos, d.kind));
+                // A node's loads are its fanout edges (inferred), each as
+                // position:sram1:sram2.
+                let base = t.node_load_base[i] as usize;
+                let n = tpl.fanout_offsets.len();
+                if base + n > t.loads.len() {
+                    out_of_range += 1;
+                }
+                let loads: Vec<String> = t.loads.get(base..base + n).unwrap_or(&[]).iter()
+                    .map(|l| format!("{}:{}:{}", l.position, l.sram1, l.sram2)).collect();
+                writeln!(o, "{i},{},{},{},{},{},{},{},{},{dp},{dm},{base},{}", e.x, e.y, tpl.element_enum, tpl.z, tpl.index,
+                    si.length, si.resistance.first().unwrap_or(&f32::NAN), si.capacitance.first().unwrap_or(&f32::NAN), loads.join(" "))?;
+            }
+            if out_of_range > 0 {
+                eprintln!("route-timing: {out_of_range} elements' fanout runs past the load list");
+            }
+        }
+        ("route-timing-trace", [f]) => {
+            let d = container::Ddb::open(&PathBuf::from(f))?;
+            let mut log = Vec::new();
+            let r = rtiming::parse(&d.body, Some(&mut log));
+            println!("{}", log.join("\n"));
+            r?;
         }
         ("export", [dir, die, out]) => {
             export::run(&PathBuf::from(dir), die, &PathBuf::from(out))?;

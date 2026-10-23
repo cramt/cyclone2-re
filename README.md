@@ -92,6 +92,25 @@ Format details, with every claim marked observed or inferred, are in
   with 62,667 to 776,454 routing elements. Only magellan4 is checked
   against the trace.
 
+### Timing model
+
+Details, with every claim marked observed, inferred or unknown, are in
+[docs/timing-model.md](docs/timing-model.md).
+
+- **Cell delays are stored. Routing delays are computed.** The per-corner
+  DMF (`ddb_magellan4-6.dmf.ddb` for the slow model, `-m` for the fast one)
+  is a tree of integer picosecond values: LUT, carry, register tco/tsu/th,
+  IOE, clock buffers and some clock-network hops. `ddb dmf` decodes it and
+  matches the Quartus trace token for token. Every LE and register delay in
+  the oracle design's `quartus_sta` reports is a DMF value: 53/53 distinct
+  values (22,513 rows) slow, 47/47 (22,270 rows) fast.
+- Routing elements have no stored delay. `ddb_magellan4_timing.ddb` gives
+  each element a length, R/µm, C/µm, a driver model and its load
+  positions. `ddb route-timing` decodes this, matching the trace. The
+  fitter turns these into delays with the NLSPC driver models, which are
+  not decoded yet. The fitter's per-type average estimates (`fdi`) are
+  within about 30% of STA medians and can serve as a first router cost.
+
 ### Oracle harness (phase 0)
 
 - `tools/oracle.sh <dir>` compiles `<dir>/top.v` plus `<dir>/assignments.qsf`

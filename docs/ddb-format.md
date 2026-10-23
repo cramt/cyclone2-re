@@ -228,8 +228,10 @@ Not yet known: the names of most `m_element_enum` values. They index
 `LE_BUFFER`, 276 `LOCAL_INTERCONNECT`, 264 `R4` (H4), 268 `R24`, 269
 `C4` (V4), 275 `C16`, 289 `CLK_BUFFER`. **[obs]**: with this table every
 consecutive resource pair in 17 fuzz rcf files is exactly one fanout edge.
-43 is an edge-less per-LE element. **[inf]** The names are in
-`DEV_ELEMENT_DESC` (hdr ddb).
+The names are in `DEV_ELEMENT_DESC_BODY` in the hdr ddb (`m_int_data[0]` =
+enum, `m_string_data[0]` = name). 43 is `LOCAL`, the LE output feeding back
+into its own LAB, and 276 is `LAB_LINE`. See
+[timing-model.md](timing-model.md#element-enum-names). **[obs]**
 
 ### `asm`: `DYGR_ROUTE_ASM_INFO_BODY`: routing bits
 
@@ -504,7 +506,8 @@ ASM node count equal to element count, and all edges inside the graph.
 - The middle of the routing body: block interfaces and lookup tables. This
   section is needed for non-wire node names (`IP:LEIM*`, `LL:*`, `LO:*`)
   and for (x, y, type, index) to element lookup.
-- `DEV_ELEMENT_ENUM` value names.
+- `DEV_ELEMENT_ENUM` value names beyond the routing ones in
+  [timing-model.md](timing-model.md#element-enum-names).
 - The meaning of exclusion groups, and of the
   `use_encoded_setting`/`is_encoded_bit_high` bits (about 1.5% of bits).
 - `asmdb`: M4K, MAC and PLL group semantics (decoded, unused); IOE

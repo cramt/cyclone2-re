@@ -42,3 +42,27 @@ python3 asmdb_semantic.py trace.canon | cmp - rust.txt
 ```
 
 The trace is Quartus-derived, so it never leaves `specimens/`.
+
+## Timing (see docs/timing-model.md)
+
+The DMF cell-delay files and `ddb_<die>_timing.ddb` are in the
+`quartus_fit` trace. Cut out the section whose body size matches the file
+(`ddb info`), then compare value streams. The timing decoder stops after the
+packed load-driver array, so compare only that many leading tokens.
+
+```sh
+ddb dmf-trace $DEVINFO/ddb_magellan4-6.dmf.ddb | cmp - <(python3 dmf_trace_tokens.py dmf_trace.txt)
+ddb route-timing-trace $DEVINFO/ddb_magellan4_timing.ddb > rust.tok
+python3 rtiming_trace_tokens.py timing_trace.txt | head -n $(wc -l < rust.tok) | cmp - rust.tok
+```
+
+Against `quartus_sta`: extract the enum names once, dump the DMF, and
+match every cell arc of a `report_timing -detail full_path -show_routing`
+report.
+
+```sh
+python3 dbs_enum_strings.py ~/altera/13.0sp1/quartus/linux64/libdb_dbs.so names/
+ddb dmf $DEVINFO/ddb_magellan4-6.dmf.ddb names/ > dmf6.tsv
+python3 sta_rows.py setup_slow.rpt hold_slow.rpt > rows.tsv
+python3 dmf_sta_check.py dmf6.tsv rows.tsv | tail -1
+```
