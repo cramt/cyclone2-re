@@ -14,6 +14,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
         nextpnr-cyclone2 = pkgs.callPackage ./nix/nextpnr-cyclone2.nix { };
         cram = pkgs.callPackage ./nix/cram.nix { };
+        db = pkgs.callPackage ./nix/db.nix { };
         cyclone2-synth = pkgs.callPackage ./nix/synth.nix { };
         # v1.1.1 only knows the EP2C5, so it can't find the DE2's EP2C35 on
         # the JTAG chain. Cyclone II IDCODEs landed upstream in
@@ -35,6 +36,7 @@
             nextpnr-cyclone2
             openfpgaloader
             cram
+            db
             cyclone2-synth
             ;
         };

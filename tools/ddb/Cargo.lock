@@ -48,6 +48,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "chipsmith-cyclone2"
 version = "0.1.0"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c8dbabda03e10339b3e70252f96576c135a77c45#c8dbabda03e10339b3e70252f96576c135a77c45"
 dependencies = [
  "anyhow",
  "chipsmith-jtag",
@@ -62,6 +63,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-jtag"
 version = "0.1.0"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c8dbabda03e10339b3e70252f96576c135a77c45#c8dbabda03e10339b3e70252f96576c135a77c45"
 dependencies = [
  "anyhow",
  "rusb",
@@ -70,6 +72,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-route"
 version = "0.1.0"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c8dbabda03e10339b3e70252f96576c135a77c45#c8dbabda03e10339b3e70252f96576c135a77c45"
 dependencies = [
  "anyhow",
  "lzma-rust2",
