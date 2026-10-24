@@ -470,6 +470,11 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
     }
     let mut out = Vec::new();
     for a in atoms.iter().filter(|a| a.kind == "io") {
+        // The dedicated JTAG pins Quartus puts in the netlist when a design
+        // instantiates the JTAG block: not user I/O, nothing to configure.
+        if a.port("padio").is_some_and(|p| p.starts_with("altera_reserved_")) {
+            continue;
+        }
         let pin = a.loc.strip_prefix("PIN_").with_context(|| format!("{}: location {}", a.name, a.loc))?.to_string();
         let port = a.port("padio").with_context(|| format!("{}: no padio", a.name))?.to_string();
         let standard = Standard::parse(a.note("I/O Standard").with_context(|| format!("{}: no I/O standard", a.name))?)?;
@@ -787,7 +792,9 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
 impl IoDb {
     /// Every IOE bit, for a design using `uses`. Unused dual-purpose pins
     /// are left out (they keep the base image).
-    pub fn bits(&self, uses: &[PinUse], unused: UnusedPins) -> Result<Vec<(IoBit, bool)>> {
+    /// `serial_flash_claimed`: the serial-flash block drives ASDO and nCSO
+    /// (an unclaimed one is an input with pull-up).
+    pub fn bits(&self, uses: &[PinUse], unused: UnusedPins, serial_flash_claimed: bool) -> Result<Vec<(IoBit, bool)>> {
         let by_pin: HashMap<&str, &PinUse> = uses.iter().map(|u| (u.pin.as_str(), u)).collect();
         // A bank's I/O standard is that of the pins the design puts in it
         // (Quartus requires them to agree on VCCIO); empty banks are 3.3 V.
@@ -810,7 +817,12 @@ impl IoDb {
             let settings = match (u, p.dual_purpose) {
                 (Some(u), _) => used_settings(p.ioe.block, u)?,
                 (None, Some(d)) => {
-                    dual_purpose_settings(p.ioe.block, d, bank_std.get(&p.bank).copied().unwrap_or(Standard::Lvttl33))?
+                    let mut v =
+                        dual_purpose_settings(p.ioe.block, d, bank_std.get(&p.bank).copied().unwrap_or(Standard::Lvttl33))?;
+                    if serial_flash_claimed && d == DualPurpose::SerialFlash {
+                        v.retain(|s| s.0 != arch::IO_USE_PULL_UP);
+                    }
+                    v
                 }
                 (None, None) => unused_settings(p.ioe.block, unused),
             };

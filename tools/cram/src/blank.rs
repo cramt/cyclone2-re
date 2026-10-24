@@ -154,7 +154,7 @@ pub fn image(db: &Asmdb, io: &IoDb) -> Result<Rbf> {
     for y in 1..=35 {
         r.set(addr::frame_row(UNNAMED_CENTRE_FRAME, le::lab_row(y) + UNNAMED_LAB_ROW), true);
     }
-    for (b, v) in io.bits(&[], UnusedPins::InputTriStated)? {
+    for (b, v) in io.bits(&[], UnusedPins::InputTriStated, false)? {
         match b {
             IoBit::Core(b) => r.set(b, v),
             IoBit::Rep(b) => r.rep_set(b, v),

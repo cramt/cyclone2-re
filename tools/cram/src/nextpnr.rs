@@ -17,7 +17,21 @@ use crate::chipdb::{element_name, M4K_CONTROL_PINS};
 use crate::io::{Dir, Input, IoDb, OutData, Output, OutputEnable, PinUse, Standard, UnusedPins, BLOCK_CLK_N, BLOCK_CLK_P, BLOCK_COL};
 use crate::logic::{clock_slots, Aclr, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic, Lut, Reg, Sload};
 use crate::m4k::{self, Content, Controls, CtlSrc, M4k, Mode, ReadPort, Sel, Width};
+use crate::hard::{self, Asmi, Hard, HardInput, Jtag};
 use crate::phys::{PhysDesign, Pip, RoutedNet};
+
+/// Output pins of the CY2_JTAG and CY2_ASMI cells.
+const HARD_OUTPUTS: [&str; 9] =
+    ["TMSUTAP", "TCKUTAP", "TDIUTAP", "SHIFTUSER", "CLKDRUSER", "UPDATEUSER", "RUNIDLEUSER", "USR1USER", "DATA0OUT"];
+/// The dedicated JTAG pins, which a VQM instantiating the JTAG block has
+/// to connect it to (quartus_map: "JTAG port tck must connect to an I/O
+/// pin").
+const JTAG_PORTS: [(&str, &str, &str); 4] = [
+    ("input", "altera_reserved_tms", "tms"),
+    ("input", "altera_reserved_tck", "tck"),
+    ("input", "altera_reserved_tdi", "tdi"),
+    ("output", "altera_reserved_tdo", "tdo"),
+];
 
 /// A nextpnr wire, by what it is in the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,6 +50,8 @@ enum Wire {
     Ctrl { x: u32, y: u32, k: u32 },
     /// A pin of the M4K block at (x, y), or one of its control inputs.
     M4k { x: u32, y: u32, pin: M4kPin },
+    /// An input of the JTAG or serial-flash block.
+    Hard(HardInput),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,6 +93,8 @@ enum Bel {
     Ioe { x: u32, y: u32, z: u32 },
     ClkCtrl { g: u32 },
     M4k { x: u32, y: u32 },
+    Jtag,
+    Asmi,
 }
 
 #[derive(Debug)]
@@ -210,6 +228,9 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
         if let Some(g) = num(bel, "CLKCTRL") {
             return Ok(Wire::ClkIn { g });
         }
+        if let Some(h) = HardInput::ALL.into_iter().find(|h| h.bel_pin() == (bel, pin)) {
+            return Ok(Wire::Hard(h));
+        }
     }
     bail!("unknown wire {name} in tile X{tx}Y{ty}")
 }
@@ -230,6 +251,12 @@ fn bel(tx: u32, ty: u32, name: &str) -> Result<Bel> {
     }
     if name == "M4K" {
         return Ok(Bel::M4k { x, y });
+    }
+    if name == "JTAG" {
+        return Ok(Bel::Jtag);
+    }
+    if name == "ASMI" {
+        return Ok(Bel::Asmi);
     }
     bail!("unknown bel {name}")
 }
@@ -462,6 +489,7 @@ impl Routed {
         let mut ram_in: HashMap<(u32, u32), BTreeMap<m4k::Input, u8>> = HashMap::new();
         let mut ram_pia: HashMap<(u32, u32), [Option<u8>; 8]> = HashMap::new();
         let mut ram_ctl: HashMap<(u32, u32, u8), CtlSrc> = HashMap::new();
+        let mut hard_in: HashMap<HardInput, hard::Line> = HashMap::new();
         let mut nets = Vec::new();
         for n in self.nets.values() {
             let mut pips = Vec::new();
@@ -485,6 +513,11 @@ impl Routed {
                             M4kPin::Ctl(k) => ram_pia.entry((x, y)).or_default()[k as usize] = Some(line),
                             M4kPin::Fast(_) => unreachable!(),
                         }
+                    }
+                    (Wire::Node(s), Wire::Hard(h)) => {
+                        let t = &dev.routing.templates[dev.routing.elements[s.0 as usize].template as usize];
+                        ensure!(t.element_enum == 276, "{}: {h:?} from {}", n.name, element_name(t.element_enum));
+                        hard_in.insert(h, hard::Line::new(t.index as u32)?);
                     }
                     (Wire::M4k { pin: M4kPin::Ctl(k), .. }, Wire::M4k { x, y, pin: M4kPin::Fast(f) }) => {
                         ram_ctl.insert((x, y, f), CtlSrc::Control(k));
@@ -567,6 +600,7 @@ impl Routed {
         let mut clkctrls = Vec::new();
         let mut pins = Vec::new();
         let mut m4ks = Vec::new();
+        let mut hard = Hard::default();
         let mut ff_domain: HashMap<(u32, u32, u32), Domain> = HashMap::new();
         let sdata: std::collections::HashSet<(u32, u32, u32)> = self
             .cells
@@ -619,6 +653,11 @@ impl Routed {
                         inputs: ram_in.remove(&(x, y)).unwrap_or_default(),
                         content: shape.content,
                     });
+                }
+                ("CY2_JTAG", Bel::Jtag) => hard.jtag = Some(Jtag { tdouser: hard_in.get(&HardInput::Tdouser).copied() }),
+                ("CY2_ASMI", Bel::Asmi) => {
+                    let need = |h: HardInput| hard_in.get(&h).copied().with_context(|| format!("{name}: {h:?} not routed"));
+                    hard.asmi = Some(Asmi { dclk: need(HardInput::Dclk)?, sce: need(HardInput::Sce)?, sdo: need(HardInput::Sdo)? });
                 }
                 ("CLKCTRL", Bel::ClkCtrl { g }) => {
                     let input = *clk_in.get(&g).with_context(|| format!("{name}: input not routed"))?;
@@ -716,6 +755,7 @@ impl Routed {
             pins,
             unused_pins: UnusedPins::InputTriStated,
             m4ks,
+            hard,
             nets,
         })
     }
@@ -755,6 +795,16 @@ fn resource(dev: &Device, w: Wire, ioe_out_x: impl Fn(u32, u32, u32) -> u32) -> 
         Wire::Ctrl { x, y, k } => Some(format!("LAB_CONTROL_MUX:X{x}Y{y}S0I{k}")),
         Wire::Ioe { x, y, z, pin: IoePin::DataOut } => Some(format!("IO_DATAOUT:X{}Y{y}S{}I0", ioe_out_x(x, y, z), z % 8)),
         Wire::Ioe { x, y, z, pin: IoePin::Oe } => Some(format!("IO_OE_PIN:X{}Y{y}S{}I0", ioe_out_x(x, y, z), z % 8)),
+        Wire::Hard(h) => {
+            let (x, y) = h.xy();
+            let (kind, z) = match h {
+                HardInput::Tdouser => ("JTAG_TDOUSER_PIN", 0),
+                HardInput::Dclk => ("ASMI_DCLKIN", 2),
+                HardInput::Sce => ("ASMI_SCEIN", 2),
+                HardInput::Sdo => ("ASMI_SDOIN", 2),
+            };
+            Some(format!("{kind}:X{x}Y{y}S{z}I0"))
+        }
         _ => None,
     }
 }
@@ -779,6 +829,8 @@ impl Routed {
                 Bel::Ff { x, y, k } => format!("ff_x{x}_y{y}_n{}", 2 * k + 1),
                 Bel::ClkCtrl { g } => format!("clkctrl_g{g}"),
                 Bel::M4k { x, y } => format!("m4k_x{x}_y{y}"),
+                Bel::Jtag => "jtag".to_string(),
+                Bel::Asmi => "asmi".to_string(),
                 Bel::Ioe { .. } => {
                     let p = c.attrs.get("PORT").with_context(|| format!("{name}: no PORT"))?;
                     port_of.insert(name, p.clone());
@@ -800,6 +852,8 @@ impl Routed {
                     ("CY2_IBUF", "COMBOUT") => a.clone(),
                     ("CY2_IOBUF", "COMBOUT") => format!("{a}_combout"),
                     ("CY2_M4K", o) if o.starts_with("DO") => format!("{a}_q{}", &o[2..]),
+                    ("CY2_JTAG", o) if HARD_OUTPUTS.contains(&o) => format!("{a}_{}", o.to_lowercase()),
+                    ("CY2_ASMI", "DATA0OUT") => format!("{a}_data0out"),
                     _ => continue,
                 };
                 driver.insert(id, sig);
@@ -813,7 +867,7 @@ impl Routed {
         let mut loads: HashMap<u64, Vec<(&str, &str)>> = HashMap::new();
         for (name, c) in &self.cells {
             for (p, &id) in &c.conns {
-                let ram_out = c.ty == "CY2_M4K" && p.starts_with("DO");
+                let ram_out = (c.ty == "CY2_M4K" && p.starts_with("DO")) || HARD_OUTPUTS.contains(&p.as_str());
                 if !["COMBOUT", "COUT", "REGOUT", "OUTCLK"].contains(&p.as_str()) && !(c.ty == "CY2_IBUF") && !ram_out {
                     loads.entry(id).or_default().push((name.as_str(), p.as_str()));
                 }
@@ -866,12 +920,22 @@ impl Routed {
                 e.1 = Some(e.1.map_or(i, |m: u32| m.max(i)));
             }
         }
+        let jtag = self.cells.values().any(|c| c.bel == Bel::Jtag);
         let mut v = String::new();
         writeln!(v, "// Generated by `cram quartus-export` from a nextpnr routed design.")?;
-        writeln!(v, "module top({});", ports.keys().map(|p| vid(p)).collect::<Vec<_>>().join(", "))?;
+        let mut names: Vec<String> = ports.keys().map(|p| vid(p)).collect();
+        if jtag {
+            names.extend(JTAG_PORTS.iter().map(|p| p.1.to_string()));
+        }
+        writeln!(v, "module top({});", names.join(", "))?;
         for (p, (out, w)) in &ports {
             let r = w.map(|m| format!("[{m}:0] ")).unwrap_or_default();
             writeln!(v, "{out} {r}{};", vid(p))?;
+        }
+        if jtag {
+            for (dir, p, _) in JTAG_PORTS {
+                writeln!(v, "{dir} {p};")?;
+            }
         }
         let feeder_outs: std::collections::HashSet<&String> =
             feeder.keys().filter_map(|n| self.cells[*n].conns.get("COMBOUT").and_then(|id| driver.get(id))).collect();
@@ -1026,6 +1090,22 @@ impl Routed {
                     }
                     writeln!(qsf, "set_location_assignment M4K_X{x}_Y{y} -to {}", atom[name.as_str()])?;
                 }
+                Bel::Jtag => {
+                    writeln!(v, "cycloneii_jtag {a}(")?;
+                    for (_, p, atom_port) in JTAG_PORTS {
+                        writeln!(v, "  .{atom_port}({p}),")?;
+                    }
+                    let outs: Vec<String> =
+                        HARD_OUTPUTS[..8].iter().map(|o| format!("  .{}({})", o.to_lowercase(), net(c, o, ""))).collect();
+                    writeln!(v, "  .tdouser({}),\n{});", net(c, "TDOUSER", "1'b0"), outs.join(",\n"))?;
+                }
+                Bel::Asmi => {
+                    writeln!(v, "cycloneii_asmiblock {a}(")?;
+                    for (p, cp) in [("dclkin", "DCLKIN"), ("scein", "SCEIN"), ("sdoin", "SDOIN")] {
+                        writeln!(v, "  .{p}({}),", net(c, cp, "1'b0"))?;
+                    }
+                    writeln!(v, "  .oe(1'b0),\n  .data0out({}));", net(c, "DATA0OUT", ""))?;
+                }
                 Bel::ClkCtrl { g } => {
                     writeln!(v, "cycloneii_clkctrl {a}(")?;
                     writeln!(v, "  .inclk({{1'b0, 1'b0, 1'b0, {}}}),", net(c, "INCLK", "1'b0"))?;
@@ -1118,7 +1198,12 @@ impl Routed {
             let out = out.or_else(|| {
                 (0..m4k::COLS).find_map(|k| c.conns.get(&format!("DO{k}")).and_then(|id| driver.get(id))).filter(|_| c.ty == "CY2_M4K")
             });
-            rcf_name.insert(name, out.cloned().unwrap_or_else(|| atom[name.as_str()].clone()));
+            // The serial-flash block is named after its data0out, the JTAG
+            // block after its TDO (quartus_map's names, as the rcf of a
+            // Quartus-fitted design shows).
+            let out = out.or_else(|| c.conns.get("DATA0OUT").and_then(|id| driver.get(id)).filter(|_| c.ty == "CY2_ASMI"));
+            let out = out.cloned().or_else(|| (c.bel == Bel::Jtag).then(|| format!("{}~TDO", atom[name.as_str()])));
+            rcf_name.insert(name, out.unwrap_or_else(|| atom[name.as_str()].clone()));
         }
         let atom = rcf_name;
         let perm = perms(&self.nets);
@@ -1164,6 +1249,11 @@ impl Routed {
                         if let Wire::Ioe { x, y, z, pin } = p.dst {
                             let c = cell_at.get(&Bel::Ioe { x, y, z }).context("output pin cell")?;
                             let port = if pin == IoePin::Oe { "OE" } else { "DATAIN" };
+                            dests.entry(d).or_default().push(format!("dest = ( {}, {port} );", atom[*c]));
+                        } else if let Wire::Hard(h) = p.dst {
+                            let (bel, port) = h.bel_pin();
+                            let b = if bel == "JTAG" { Bel::Jtag } else { Bel::Asmi };
+                            let c = cell_at.get(&b).with_context(|| format!("{}: {bel} pin without its cell", n.name))?;
                             dests.entry(d).or_default().push(format!("dest = ( {}, {port} );", atom[*c]));
                         }
                     }

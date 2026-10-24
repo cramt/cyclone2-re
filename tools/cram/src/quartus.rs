@@ -30,7 +30,8 @@ pub fn load(dev: &Device, dir: &Path) -> Result<Loaded> {
     let unused_pins = io::UnusedPins::from_qsf(&qsf)?;
     let rcf_text = std::fs::read_to_string(dir.join("build/top.rcf"))?;
     let (m4ks, ram_unmodelled) = m4k::from_quartus(&atoms, &sigs, &rcf_text)?;
+    let hard = crate::hard::from_quartus(&atoms, &sigs)?;
     let mut unmodelled = unmodelled;
     unmodelled.extend(ram_unmodelled);
-    Ok(Loaded { design: PhysDesign { logic, pins, unused_pins, m4ks, nets }, unmodelled, skipped_resources: skipped.len() })
+    Ok(Loaded { design: PhysDesign { logic, pins, unused_pins, m4ks, hard, nets }, unmodelled, skipped_resources: skipped.len() })
 }

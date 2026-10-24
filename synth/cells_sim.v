@@ -43,3 +43,19 @@ module CY2_M4K (input CLK, input [11:0] A_ADDR, input [35:0] A_DATAIN, input A_W
   parameter WIDTH = 1;
   parameter [4607:0] INIT = 4608'b0;
 endmodule
+
+// The JTAG block (one per device): TAP signals out to the core during a
+// user instruction (USER0 IR 0x00c, USER1 0x00e), TDOUSER shifted out on TDO.
+// cycloneii_jtag minus the pin ports, which the device wires itself.
+(* blackbox *)
+module CY2_JTAG (input TDOUSER, output TMSUTAP, output TCKUTAP, output TDIUTAP,
+                 output SHIFTUSER, output CLKDRUSER, output UPDATEUSER,
+                 output RUNIDLEUSER, output USR1USER);
+endmodule
+
+// The serial-flash block (one per device): drives DCLK, nCSO and ASDO of
+// the configuration flash from the core and returns DATA0. Always driving
+// (cycloneii_asmiblock with oe tied low, the only mode modelled).
+(* blackbox *)
+module CY2_ASMI (input DCLKIN, input SCEIN, input SDOIN, output DATA0OUT);
+endmodule

@@ -140,6 +140,12 @@ impl Rbf {
         let m = 1u8 << (b.bit % 8);
         self.set_rep_byte(f, byte, if v { old | m } else { old & !m });
     }
+    /// Set an option bit of the header's ID block (0x4c..0x75, bits 0-1;
+    /// `fix_crcs` updates its check word).
+    pub fn set_option(&mut self, byte: usize, bit: u8) {
+        assert!((0x4c..HDR_CRC_AT).contains(&byte) && bit < 2, "not an ID-block option bit");
+        self.0[byte] |= 1 << bit;
+    }
     /// Are all 4 copies of every byte equal and is the check word right?
     pub fn rep_frame_ok(&self, frame: usize) -> bool {
         let copies_ok = (0..FRAME_BYTES).all(|b| {

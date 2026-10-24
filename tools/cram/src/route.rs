@@ -44,6 +44,18 @@ pub fn element_enum(kind: &str) -> Option<i16> {
         // M4K data out onto the routing (M4K fuzz designs: every output's
         // first hop is an edge from this element).
         "M4K_BUFFER" => 278,
+        // The JTAG and serial-flash (ASMI) hard blocks' outputs into the
+        // core, at X6 Y20-22: matched against their rcf chains like the rest
+        // (hard-block designs, README "JTAG and serial-flash blocks").
+        "JTAG_TMSUTAP_PIN" => 361,
+        "JTAG_TCKUTAP_PIN" => 362,
+        "JTAG_TDIUTAP_PIN" => 363,
+        "JTAG_SHIFTUSER_PIN" => 364,
+        "JTAG_CLKDRUSER_PIN" => 365,
+        "JTAG_UPDATEUSER_PIN" => 366,
+        "JTAG_RUNIDLEUSER_PIN" => 367,
+        "JTAG_USR1USER_PIN" => 368,
+        "ASMI_DATAOUT" => 474,
         _ => return None,
     })
 }

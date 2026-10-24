@@ -54,6 +54,16 @@ pub fn element_name(e: i16) -> String {
         513 => "CLKBUF_IN",
         515 => "CLKBUF_OUT",
         560 => "BLK_CLK_BUF",
+        // The rcf's names for the JTAG and serial-flash blocks' outputs.
+        361 => "JTAG_TMSUTAP_PIN",
+        362 => "JTAG_TCKUTAP_PIN",
+        363 => "JTAG_TDIUTAP_PIN",
+        364 => "JTAG_SHIFTUSER_PIN",
+        365 => "JTAG_CLKDRUSER_PIN",
+        366 => "JTAG_UPDATEUSER_PIN",
+        367 => "JTAG_RUNIDLEUSER_PIN",
+        368 => "JTAG_USR1USER_PIN",
+        474 => "ASMI_DATAOUT",
         _ => return format!("E{e}"),
     }
     .to_string()
@@ -464,6 +474,43 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
             ("INCLK".into(), inclk, false),
             ("OUTCLK".into(), out, true),
         ]));
+    }
+    // The JTAG and serial-flash blocks (hard.rs): one bel each, inputs
+    // behind source muxes over the tile's local lines, outputs on their
+    // routing elements.
+    {
+        use crate::hard::{HardInput, ASMI_DATA0OUT, ASMI_XY, JTAG_OUTPUTS, JTAG_XY};
+        let mut pins: BTreeMap<&str, Vec<(String, String, bool)>> = BTreeMap::new();
+        for input in HardInput::ALL {
+            let (bel, pin) = input.bel_pin();
+            let (x, y) = input.xy();
+            let w = format!("{bel}.{pin}");
+            let mut srcs = Vec::new();
+            for l in db.hard.sources(input) {
+                srcs.push(alias_g(&mut ltiles, &mut members, (x, y), find(x, y, 276, 0, l.index() as i16)?));
+            }
+            let t = ltiles.entry((x, y)).or_default();
+            t.wire(&w, "HARD_INPUT");
+            for s in srcs {
+                t.pip(&s, &w);
+            }
+            pins.entry(bel).or_default().push((pin.to_string(), w, false));
+        }
+        let element = |e: i16| -> Result<usize> {
+            let v: Vec<usize> = (0..n).filter(|&i| tmpl(i).element_enum == e).collect();
+            ensure!(v.len() == 1, "{} elements {}", v.len(), element_name(e));
+            Ok(v[0])
+        };
+        for (_, port, e) in JTAG_OUTPUTS {
+            let g = alias_g(&mut ltiles, &mut members, JTAG_XY, element(e)?);
+            pins.entry("JTAG").or_default().push((port.to_uppercase(), g, true));
+        }
+        let g = alias_g(&mut ltiles, &mut members, ASMI_XY, element(ASMI_DATA0OUT)?);
+        pins.entry("ASMI").or_default().push(("DATA0OUT".into(), g, true));
+        for (bel, xy) in [("JTAG", JTAG_XY), ("ASMI", ASMI_XY)] {
+            let p = pins.remove(bel).unwrap_or_default();
+            ltiles.entry(xy).or_default().bels.push((bel.into(), bel.into(), 0, p));
+        }
     }
     for xy in ltiles.keys() {
         ensure!(!lab_set.contains(xy), "LAB tile X{} Y{} also holds I/O or clock control", xy.0, xy.1);

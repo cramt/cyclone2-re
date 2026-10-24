@@ -4,6 +4,7 @@ pub mod addr;
 pub mod blank;
 pub mod chipdb;
 pub mod db;
+pub mod hard;
 pub mod lab;
 pub mod logic;
 pub mod m4k;

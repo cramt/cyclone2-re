@@ -61,6 +61,8 @@ pub struct PhysDesign {
     pub unused_pins: UnusedPins,
     /// M4K RAM blocks in use.
     pub m4ks: Vec<M4k>,
+    /// The JTAG and serial-flash blocks, when the design uses them.
+    pub hard: crate::hard::Hard,
     pub nets: Vec<RoutedNet>,
 }
 
@@ -75,6 +77,8 @@ pub enum Source {
     Io,
     /// ddb asmdb: M4K RAM block configuration and contents.
     Ram,
+    /// ddb asmdb: the JTAG and serial-flash blocks' input muxes.
+    Hard,
 }
 
 /// The CRAM a physical design fixes. Bits not listed keep the base image's
@@ -83,6 +87,8 @@ pub struct Bits {
     pub core: Vec<(FrameBit, bool, Source)>,
     /// IOE bits in the replicated frames (`Source::Io`).
     pub rep: Vec<(RepBit, bool)>,
+    /// Option bits of the header's ID block to set: (byte, bit).
+    pub options: Vec<(usize, u8)>,
 }
 
 impl Bits {
@@ -106,6 +112,7 @@ pub struct Db {
     pub lab: LabDb,
     pub io: IoDb,
     pub m4k: M4kDb,
+    pub hard: crate::hard::HardDb,
 }
 
 impl PhysDesign {
@@ -129,13 +136,21 @@ impl PhysDesign {
                 core.push((addr::frame_bit(flat), v, Source::Ram));
             }
         }
+        for flat in db.hard.bits(&self.hard)? {
+            core.push((addr::frame_bit(flat), true, Source::Hard));
+        }
+        // The serial-flash block drives ASDO and nCSO, so they lose the
+        // pull-up an unclaimed one has, and it sets an option bit in the
+        // header (hard.rs).
+        let serial_flash = self.hard.asmi.is_some();
+        let options = if serial_flash { vec![crate::hard::ASMI_OPTION] } else { Vec::new() };
         let mut rep = Vec::new();
-        for (b, v) in db.io.bits(&self.pins, self.unused_pins)? {
+        for (b, v) in db.io.bits(&self.pins, self.unused_pins, serial_flash)? {
             match b {
                 IoBit::Core(b) => core.push((b, v, Source::Io)),
                 IoBit::Rep(b) => rep.push((b, v)),
             }
         }
-        Ok(Bits { core, rep })
+        Ok(Bits { core, rep, options })
     }
 }

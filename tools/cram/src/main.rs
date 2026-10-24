@@ -172,6 +172,9 @@ fn pack(m: &Db, empty: &Path, des: &PhysDesign) -> Result<(Rbf, Bits)> {
     for &(b, v) in &bits.rep {
         rbf.rep_set(b, v);
     }
+    for &(byte, bit) in &bits.options {
+        rbf.set_option(byte, bit);
+    }
     rbf.fix_crcs();
     Ok((rbf, bits))
 }

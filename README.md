@@ -218,6 +218,58 @@ openFPGALoader 1.1.1 shifts a raw `.rbf` (preamble included) and does not
 check CONF_DONE, so it reports success and the device stays unconfigured.
 Hence `just flash` goes through `cram svf`.
 
+### JTAG and serial-flash blocks (phase 7)
+
+A serial flash loader (Quartus' SFL, chipsmith's `flash --persist`) is a
+design that bridges the JTAG cable to the configuration flash. It needs two
+hard blocks, one of each per device. Observed on three Quartus designs
+(a JTAG-to-EPCS bridge, the JTAG block with every output routed to a pin,
+the serial-flash block driven from switches), all byte-identical in
+`cram roundtrip` (`tools/cram/src/hard.rs`):
+
+- **Where.** Both sit in the non-LAB column X6: `cycloneii_jtag` at
+  `JTAG_X1_Y19_N0` (routing elements at X6 Y21-22, z 0), `cycloneii_asmiblock`
+  at `ASMIBLOCK_X1_Y19_N2` (X6 Y20, z 2). The CRC block is at X6 Y20-21 z 1,
+  not modelled. **[obs]**
+- **Outputs** are routing elements that fan out like an LE output (R4, C4
+  and local lines of X6/X7): `JTAG_TMSUTAP_PIN` 361, `TCKUTAP` 362,
+  `TDIUTAP` 363, `SHIFTUSER` 364, `CLKDRUSER` 365, `UPDATEUSER` 366,
+  `RUNIDLEUSER` 367, `USR1USER` 368, `ASMI_DATAOUT` 474 (DATA0). Matched
+  by each rcf chain's first hop. **[obs]**
+- **Inputs** have no graph edges; like an LE input, the last hop is block
+  configuration: asmdb block type 9 (`JTAG_PIA_TO_TDOUSER`,
+  `JTAG_PIA_TO_TDOUTAP`), 15 (`SPI_PIA_TO_DCLKO`, `_SCE`, `_SDO`, `_SPIOE`)
+  and 11 (`CRC_PIA_TO_*`), named by libdb_asmdb.so's translator table.
+  Each is a two-level source mux over the 15 local lines of its tile with
+  absolute addresses; source *s* is line *s* (lines 0, 1, 3, 8, 9 seen into
+  the serial-flash block, 12 into TDOUSER). **[obs]**
+- **Side effects.** Using the serial-flash block (oe tied low, so it drives
+  the pins) also sets option bit 0 of header byte 0x60 and clears the
+  pull-ups that unclaimed ASDO and nCSO get. Using only the JTAG block
+  changes nothing outside its mux. **[obs]**
+- A design instantiating `cycloneii_jtag` has to connect its tms/tck/tdi/tdo
+  to ports named `altera_reserved_tms` etc. (quartus_map error 15276
+  otherwise); they become the dedicated JTAG pins, with no user I/O bits.
+  **[obs]**
+- The open flow has them as `CY2_JTAG` and `CY2_ASMI` (`synth/cells_sim.v`,
+  bels `JTAG` at X13 Y22 and `ASMI` at X13 Y20 in the chip database), the
+  serial-flash block only with oe tied low. cram packs them and exports them
+  to Quartus. chipsmith places and routes them; this repo's nextpnr uarch
+  doesn't pack them yet.
+
+On the DE2, through chipsmith's bridge (USER0, every Shift-DR one SPI
+transaction): DATA0 shows up on TDO in the same TCK, so the silicon ID
+(0x14, an EPCS16) is bit 32 onward of a `0xab` shift. **[obs]**
+
+**The EPCS image** for an RBF is what `quartus_cpf` writes (.sof -> .pof
+-> .rpd for an EPCS16): the RBF's bytes except bit 3 of option byte 0x11
+(and its copies at 0x1a, 0x23), set in a passive-serial RBF and clear in
+the active-serial image. **[obs]**, one design. In the flash each byte is
+bit-reversed, the order the DE2's factory image is stored in. **[obs]**
+`PULSE_NCONFIG` (IR 0x001) makes the device reconfigure from the EPCS as at
+power-up: CONF_DONE high, the image's USERCODE, its LEDs. **[obs]** on the
+DE2 (RUN/PROG in RUN).
+
 ### LUT bits (phase 1)
 
 A WYSIWYG `cycloneii_lcell_comb` (`tools/gen_lut.py`) at `LCCOMB_X64_Y19_N0`
@@ -1007,7 +1059,7 @@ device database (`db/`, our own format) and our own tools.
 | 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clocks (pin → clkctrl → GCLK → RCLK → LAB) modelled: graph plus asmdb clkctrl select, checked on 2 clock pins and 4 global nets |
 | 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers incl. OE register and power-up high, output enable incl. inversion, tri-state, bidir and open drain, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical (24/24 held-out output-enable designs). Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K: done for Quartus designs (`cram roundtrip`): single port, simple and true dual port, ROM, ×1-×36 and mixed widths, packed ×32/×36 single ports, output registers, clock enables, clears, byte enables, initial contents, RAMs over several blocks; content layout, input pins and settings from the asmdb, values fit on 28 designs; 52 of 53 held-out designs byte-identical (the miss is an LE clock choice). In the open flow: single port ×1-×18, simple dual port ×1-×36 on one clock, ROMs, initial contents (`examples/ram`, `examples/ram_widths` byte-identical). Multipliers, PLLs not started |
 | 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins including tri-state and bidirectional ones: `just open-build`, no Quartus involved (packing, base image and chip database from the committed `db/`, no Quartus files at use time). M4K RAM (single port, simple dual port, ROM, ×1-×36). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx, picorv32, bidir, ram and ram_widths. No timing model, no multiplier/PLL, no registered I/O, M4K without byte/clock enables, output registers, true dual port |
-| 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | done: `cram svf` writes the JTAG stream (RBF minus its passive-serial preamble) with a CONF_DONE check; openFPGALoader plays it. Open-built designs run on a DE2. Not done: EPCS (non-volatile) programming |
+| 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | done: `cram svf` writes the JTAG stream (RBF minus its passive-serial preamble) with a CONF_DONE check; openFPGALoader plays it. Open-built designs run on a DE2. EPCS: the JTAG and serial-flash blocks are modelled (Quartus designs byte-identical, chipsmith's flash loader validates byte-identical) and chipsmith programs the EPCS16 through them |
 
 ## Prior art
 
