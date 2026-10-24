@@ -13,9 +13,10 @@ use std::path::Path;
 
 use ddb::device::{Device, Node};
 
-use crate::chipdb::element_name;
+use crate::chipdb::{element_name, M4K_CONTROL_PINS};
 use crate::io::{Dir, Input, IoDb, OutData, Output, OutputEnable, PinUse, Standard, UnusedPins, BLOCK_CLK_N, BLOCK_CLK_P, BLOCK_COL};
 use crate::logic::{clock_slots, Aclr, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic, Lut, Reg, Sload};
+use crate::m4k::{self, Content, Controls, CtlSrc, M4k, Mode, ReadPort, Sel, Width};
 use crate::phys::{PhysDesign, Pip, RoutedNet};
 
 /// A nextpnr wire, by what it is in the device.
@@ -33,6 +34,19 @@ enum Wire {
     ClkIn { g: u32 },
     /// LAB control line k (rcf LAB_CONTROL_MUX).
     Ctrl { x: u32, y: u32, k: u32 },
+    /// A pin of the M4K block at (x, y), or one of its control inputs.
+    M4k { x: u32, y: u32, pin: M4kPin },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum M4kPin {
+    /// An input behind a source mux over the block's LAB lines.
+    In(m4k::Input),
+    /// Control input k (`RAM_PIA_TO_INPUT_YGR` k, rcf
+    /// `M4K_LEFT_CONTROL_INPUT`), fed from a LAB line.
+    Ctl(u8),
+    /// A control pin behind a fast mux: `chipdb::M4K_CONTROL_PINS[i]`.
+    Fast(u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,6 +76,7 @@ enum Bel {
     Ff { x: u32, y: u32, k: u32 },
     Ioe { x: u32, y: u32, z: u32 },
     ClkCtrl { g: u32 },
+    M4k { x: u32, y: u32 },
 }
 
 #[derive(Debug)]
@@ -143,6 +158,19 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
     if let Some(b) = num(name, "BCB") {
         return Ok(Wire::Node(find(dev, x, y, 560, 0, b)?));
     }
+    if let Some(k) = num(name, "MB") {
+        return Ok(Wire::Node(find(dev, x, y, 278, 0, k)?));
+    }
+    if let Some(pin) = name.strip_prefix("M4K.") {
+        let pin = if let Some(k) = num(pin, "CTL") {
+            M4kPin::Ctl(k as u8)
+        } else if let Some(i) = M4K_CONTROL_PINS.iter().position(|p| p.0 == pin) {
+            M4kPin::Fast(i as u8)
+        } else {
+            M4kPin::In(m4k::Input::from_pin_name(pin).with_context(|| format!("wire {name}"))?)
+        };
+        return Ok(Wire::M4k { x, y, pin });
+    }
     if let Some(k) = num(name, "LL") {
         return Ok(Wire::LocalLine { x, y, k });
     }
@@ -199,6 +227,9 @@ fn bel(tx: u32, ty: u32, name: &str) -> Result<Bel> {
     }
     if let Some(g) = num(name, "CLKCTRL") {
         return Ok(Bel::ClkCtrl { g });
+    }
+    if name == "M4K" {
+        return Ok(Bel::M4k { x, y });
     }
     bail!("unknown bel {name}")
 }
@@ -299,6 +330,90 @@ fn lut_mask(c: &Cell) -> Result<u16> {
     Ok(u16::from_str_radix(s, 2)?)
 }
 
+/// What a packed CY2_M4K cell (nextpnr/cyclone2 `pack_m4k`: physical pin
+/// names, MODE, WIDTH, INIT) configures, before routing.
+struct M4kShape {
+    /// Simple dual port (port A writes, port B reads), else single port.
+    dual: bool,
+    width: Width,
+    /// Data bits the design uses: the physical width, less the top P/9
+    /// columns of a x9/x18/x36 port when no data pin there is connected. That
+    /// is the atom width Quartus is given (x8, x16, x32 are physically x9,
+    /// x18, x36 with bit k in column k, VQM experiment q1).
+    bits: u32,
+    writes: bool,
+    content: Content,
+}
+
+impl M4kShape {
+    fn of(c: &Cell) -> Result<M4kShape> {
+        let p = |k: &str| c.params.get(k).with_context(|| format!("M4K without {k}"));
+        let dual = match p("MODE")?.trim() {
+            "SINGLE" => false,
+            "SIMPLE_DUAL" => true,
+            m => bail!("M4K mode {m}"),
+        };
+        let w = u32::from_str_radix(p("WIDTH")?.trim(), 2)?;
+        let width = match w {
+            1 => Width::X1,
+            2 => Width::X2,
+            4 => Width::X4,
+            9 => Width::X9,
+            18 => Width::X18,
+            36 => Width::X36,
+            _ => bail!("M4K width {w}"),
+        };
+        let used = |col: u32| c.conns.contains_key(&format!("DI{col}")) || c.conns.contains_key(&format!("DO{col}"));
+        let bits = if w >= 9 && (w - w / 9..w).all(|col| !used(col)) { w - w / 9 } else { w };
+        // INIT: MSB first, bit l = linear position l (libmap's layout, which
+        // skips every ninth position for x1/x2/x4 as the block does). Bits
+        // the ports can't see stay 0, as in Quartus' contents.
+        let init = p("INIT")?.trim().as_bytes();
+        ensure!(init.len() == m4k::BITS, "M4K INIT has {} bits", init.len());
+        let mut content = Content::default();
+        for l in 0..m4k::BITS {
+            let seen = if w < 9 { l % 9 != 8 } else { (width.column(l) as u32) < bits };
+            if init[init.len() - 1 - l] == b'1' && seen {
+                content.set_linear(l);
+            }
+        }
+        Ok(M4kShape { dual, width, bits, writes: c.conns.contains_key("WE"), content })
+    }
+
+    fn mode(&self) -> Mode {
+        let port = ReadPort { width: self.width, out_reg: None };
+        if self.dual {
+            Mode::SimpleDual { write: self.writes.then_some(self.width), read: port, read_clock: Sel::Zero }
+        } else {
+            Mode::Single { a: port }
+        }
+    }
+
+    /// A read-only x36: Quartus' "rom" atom, which it builds on port B
+    /// (fuzz r36), so its port A address enters on port B's pins.
+    fn rom36(&self) -> bool {
+        self.dual && !self.writes
+    }
+
+    /// Quartus atom port (`PORTAADDR[i]`, ...) of each physical input.
+    fn atom_ports(&self) -> Result<HashMap<m4k::Input, String>> {
+        let n = self.width.addr_bits();
+        let mut out = HashMap::new();
+        for i in 0..n {
+            out.insert(m4k::Input::addr(self.rom36(), 12 - n + i)?, format!("PORTAADDR[{i}]"));
+            if self.dual && self.writes {
+                out.insert(m4k::Input::addr(true, 12 - n + i)?, format!("PORTBADDR[{i}]"));
+            }
+        }
+        if self.writes {
+            for k in 0..self.bits {
+                out.insert(m4k::Input::Data(k as u8), format!("PORTADATAIN[{k}]"));
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// Package pin at an I/O bel.
 fn pin_at(io: &IoDb, x: u32, y: u32, z: u32) -> Result<&crate::io::Pin> {
     let clock = z >= 8;
@@ -344,6 +459,9 @@ impl Routed {
         let mut data_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut oe_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut datain: HashMap<(u32, u32, u32), [bool; 2]> = HashMap::new();
+        let mut ram_in: HashMap<(u32, u32), BTreeMap<m4k::Input, u8>> = HashMap::new();
+        let mut ram_pia: HashMap<(u32, u32), [Option<u8>; 8]> = HashMap::new();
+        let mut ram_ctl: HashMap<(u32, u32, u8), CtlSrc> = HashMap::new();
         let mut nets = Vec::new();
         for n in self.nets.values() {
             let mut pips = Vec::new();
@@ -353,6 +471,29 @@ impl Routed {
                         pips.push(Pip::new(dev, s, d).with_context(|| format!("{}: no edge {s:?} -> {d:?}", n.name))?)
                     }
                     (Wire::Le { pin: LePin::Input(_), .. }, Wire::Le { pin: LePin::Logical(_), .. }) => {}
+                    // M4K inputs and control inputs: a LAB line of the block
+                    // through its source mux; control pins: a control input
+                    // or a row clock through their fast mux.
+                    (Wire::Node(s), Wire::M4k { x, y, pin: pin @ (M4kPin::In(_) | M4kPin::Ctl(_)) }) => {
+                        let t = &dev.routing.templates[dev.routing.elements[s.0 as usize].template as usize];
+                        ensure!(t.element_enum == 276, "{}: M4K input from {}", n.name, element_name(t.element_enum));
+                        let line = t.index as u8;
+                        match pin {
+                            M4kPin::In(i) => {
+                                ram_in.entry((x, y)).or_default().insert(i, line);
+                            }
+                            M4kPin::Ctl(k) => ram_pia.entry((x, y)).or_default()[k as usize] = Some(line),
+                            M4kPin::Fast(_) => unreachable!(),
+                        }
+                    }
+                    (Wire::M4k { pin: M4kPin::Ctl(k), .. }, Wire::M4k { x, y, pin: M4kPin::Fast(f) }) => {
+                        ram_ctl.insert((x, y, f), CtlSrc::Control(k));
+                    }
+                    (Wire::Node(s), Wire::M4k { x, y, pin: M4kPin::Fast(f) }) => {
+                        let t = &dev.routing.templates[dev.routing.elements[s.0 as usize].template as usize];
+                        ensure!(t.element_enum == 560, "{}: M4K control from {}", n.name, element_name(t.element_enum));
+                        ram_ctl.insert((x, y, f), CtlSrc::Global(t.index as u8));
+                    }
                     (src, dst @ (Wire::Le { pin: LePin::Input(_), .. } | Wire::Ctrl { .. })) => {
                         let s = match src {
                             Wire::Node(s) => {
@@ -425,6 +566,7 @@ impl Routed {
         let perm = perms(&self.nets);
         let mut clkctrls = Vec::new();
         let mut pins = Vec::new();
+        let mut m4ks = Vec::new();
         let mut ff_domain: HashMap<(u32, u32, u32), Domain> = HashMap::new();
         let sdata: std::collections::HashSet<(u32, u32, u32)> = self
             .cells
@@ -453,6 +595,30 @@ impl Routed {
                     let b = *clk_buf.get(&(x, y, k)).with_context(|| format!("{name}: clock not routed"))?;
                     let e = ena.get(&(x, y, k)).map(|&line| Ctl { line, inverted: flag(c, "ENA_INV") });
                     ff_domain.insert((x, y, k), (b, false, e));
+                }
+                ("CY2_M4K", Bel::M4k { x, y }) => {
+                    let shape = M4kShape::of(c).with_context(|| name.clone())?;
+                    let ctl = |pin: &str| -> Option<CtlSrc> {
+                        let f = M4K_CONTROL_PINS.iter().position(|p| p.0 == pin)? as u8;
+                        ram_ctl.get(&(x, y, f)).copied()
+                    };
+                    for (i, (pin, _, _)) in M4K_CONTROL_PINS.iter().enumerate() {
+                        if !["CLK0", "WE"].contains(pin) && ram_ctl.contains_key(&(x, y, i as u8)) {
+                            bail!("{name}: M4K {pin} not modelled in the open flow");
+                        }
+                    }
+                    let mut controls = Controls { pia: ram_pia.get(&(x, y)).copied().unwrap_or_default(), ..Default::default() };
+                    controls.clock[0] = Some(ctl("CLK0").with_context(|| format!("{name}: clock not routed"))?);
+                    controls.write_enable = ctl("WE");
+                    ensure!(controls.write_enable.is_some() == shape.writes, "{name}: write enable not routed");
+                    m4ks.push(M4k {
+                        x,
+                        y,
+                        mode: shape.mode(),
+                        controls,
+                        inputs: ram_in.remove(&(x, y)).unwrap_or_default(),
+                        content: shape.content,
+                    });
                 }
                 ("CLKCTRL", Bel::ClkCtrl { g }) => {
                     let input = *clk_in.get(&g).with_context(|| format!("{name}: input not routed"))?;
@@ -549,7 +715,7 @@ impl Routed {
             logic: Logic { les: les.into_values().collect(), clkctrls, labs },
             pins,
             unused_pins: UnusedPins::InputTriStated,
-            m4ks: vec![],
+            m4ks,
             nets,
         })
     }
@@ -579,8 +745,12 @@ fn resource(dev: &Device, w: Wire, ioe_out_x: impl Fn(u32, u32, u32) -> u32) -> 
         Wire::Node(n) => {
             let e = &dev.routing.elements[n.0 as usize];
             let t = &dev.routing.templates[e.template as usize];
-            Some(format!("{}:X{}Y{}S{}I{}", element_name(t.element_enum), e.x, e.y, t.z, t.index))
+            // The chip database's names are element_name's; the rcf's are
+            // route::element_enum's (M4K data outputs: M4K_BUFFER).
+            let kind = if t.element_enum == 278 { "M4K_BUFFER".to_string() } else { element_name(t.element_enum) };
+            Some(format!("{kind}:X{}Y{}S{}I{}", e.x, e.y, t.z, t.index))
         }
+        Wire::M4k { x, y, pin: M4kPin::Ctl(k) } => Some(format!("M4K_LEFT_CONTROL_INPUT:X{x}Y{y}S0I{k}")),
         Wire::LocalLine { x, y, k } => Some(format!("LOCAL_LINE:X{x}Y{y}S0I{k}")),
         Wire::Ctrl { x, y, k } => Some(format!("LAB_CONTROL_MUX:X{x}Y{y}S0I{k}")),
         Wire::Ioe { x, y, z, pin: IoePin::DataOut } => Some(format!("IO_DATAOUT:X{}Y{y}S{}I0", ioe_out_x(x, y, z), z % 8)),
@@ -608,6 +778,7 @@ impl Routed {
                 Bel::Lut { x, y, k } => format!("lc_x{x}_y{y}_n{}", 2 * k),
                 Bel::Ff { x, y, k } => format!("ff_x{x}_y{y}_n{}", 2 * k + 1),
                 Bel::ClkCtrl { g } => format!("clkctrl_g{g}"),
+                Bel::M4k { x, y } => format!("m4k_x{x}_y{y}"),
                 Bel::Ioe { .. } => {
                     let p = c.attrs.get("PORT").with_context(|| format!("{name}: no PORT"))?;
                     port_of.insert(name, p.clone());
@@ -628,6 +799,7 @@ impl Routed {
                     ("CLKCTRL", "OUTCLK") => format!("{a}_outclk"),
                     ("CY2_IBUF", "COMBOUT") => a.clone(),
                     ("CY2_IOBUF", "COMBOUT") => format!("{a}_combout"),
+                    ("CY2_M4K", o) if o.starts_with("DO") => format!("{a}_q{}", &o[2..]),
                     _ => continue,
                 };
                 driver.insert(id, sig);
@@ -641,7 +813,8 @@ impl Routed {
         let mut loads: HashMap<u64, Vec<(&str, &str)>> = HashMap::new();
         for (name, c) in &self.cells {
             for (p, &id) in &c.conns {
-                if !["COMBOUT", "COUT", "REGOUT", "OUTCLK"].contains(&p.as_str()) && !(c.ty == "CY2_IBUF") {
+                let ram_out = c.ty == "CY2_M4K" && p.starts_with("DO");
+                if !["COMBOUT", "COUT", "REGOUT", "OUTCLK"].contains(&p.as_str()) && !(c.ty == "CY2_IBUF") && !ram_out {
                     loads.entry(id).or_default().push((name.as_str(), p.as_str()));
                 }
             }
@@ -758,6 +931,101 @@ impl Routed {
                     writeln!(v, "  .regout({}));", net(c, "REGOUT", ""))?;
                     writeln!(qsf, "set_location_assignment LCFF_X{x}_Y{y}_N{} -to {}", 2 * k + 1, atom[name.as_str()])?;
                 }
+                Bel::M4k { x, y } => {
+                    let shape = M4kShape::of(c).with_context(|| name.clone())?;
+                    let n = shape.width.addr_bits();
+                    let (w, depth) = (shape.bits, 1u32 << n);
+                    let pin = |inp: m4k::Input| net(c, &inp.pin_name(), "1'b0");
+                    let addr = |b: bool| -> Result<String> {
+                        let v: Vec<String> = (0..n).rev().map(|i| Ok(pin(m4k::Input::addr(b, 12 - n + i)?))).collect::<Result<_>>()?;
+                        Ok(format!("{{{}}}", v.join(", ")))
+                    };
+                    let outs: Vec<String> = (0..w)
+                        .rev()
+                        .map(|k| match sig_of(c, &format!("DO{k}")) {
+                            Some(s) => vid(&s),
+                            None => {
+                                let u = format!("{}_unused_q{k}", atom[name.as_str()]);
+                                writeln!(v, "wire {};", vid(&u)).unwrap();
+                                vid(&u)
+                            }
+                        })
+                        .collect();
+                    let op = match (shape.dual, shape.writes) {
+                        (false, true) => "single_port",
+                        (true, true) => "dual_port",
+                        (_, false) => "rom",
+                    };
+                    writeln!(v, "cycloneii_ram_block {a}(")?;
+                    writeln!(v, "  .clk0({}),", net(c, "CLK0", "1'b0"))?;
+                    // A dual port must have port B's read enable driven
+                    // (error 14091), the other modes must not (14090).
+                    if op == "dual_port" {
+                        writeln!(v, "  .portbrewe(1'b1),")?;
+                    }
+                    writeln!(v, "  .portaaddr({}),", addr(shape.rom36())?)?;
+                    if shape.writes {
+                        writeln!(v, "  .portawe({}),", net(c, "WE", "1'b0"))?;
+                        let d: Vec<String> = (0..w).rev().map(|k| pin(m4k::Input::Data(k as u8))).collect();
+                        writeln!(v, "  .portadatain({{{}}}),", d.join(", "))?;
+                    }
+                    let out_port = if shape.dual && shape.writes {
+                        writeln!(v, "  .portbaddr({}),", addr(true)?)?;
+                        "portbdataout"
+                    } else {
+                        "portadataout"
+                    };
+                    writeln!(v, "  .{out_port}({{{}}}));", outs.join(", "))?;
+                    let mut p: Vec<(String, String)> = vec![
+                        ("operation_mode".into(), format!("\"{op}\"")),
+                        ("ram_block_type".into(), "\"M4K\"".into()),
+                        ("logical_ram_name".into(), format!("\"{}\"", atom[name.as_str()])),
+                        ("init_file_layout".into(), "\"port_a\"".into()),
+                    ];
+                    let ports: &[char] = if shape.dual && shape.writes { &['a', 'b'] } else { &['a'] };
+                    for &pt in ports {
+                        for (k, val) in [
+                            ("address_width", n.to_string()),
+                            ("data_width", w.to_string()),
+                            ("first_address", "0".into()),
+                            ("last_address", (depth - 1).to_string()),
+                            ("logical_ram_depth", depth.to_string()),
+                            ("logical_ram_width", w.to_string()),
+                            ("first_bit_number", "0".into()),
+                            ("data_out_clock", "\"none\"".into()),
+                        ] {
+                            p.push((format!("port_{pt}_{k}"), val));
+                        }
+                    }
+                    if ports.len() == 2 {
+                        p.push(("port_b_address_clock".into(), "\"clock0\"".into()));
+                        p.push(("port_b_read_enable_write_enable_clock".into(), "\"clock0\"".into()));
+                        p.push(("mixed_port_feed_through_mode".into(), "\"dont_care\"".into()));
+                    }
+                    // Contents in the words of port A: word a bit k at bit
+                    // a * w + k, 2,048 bits per mem_init parameter (as
+                    // Quartus writes them).
+                    let mut bits = Vec::with_capacity((depth * w) as usize);
+                    for a in 0..depth as usize {
+                        for k in 0..w as usize {
+                            bits.push(shape.content.get_linear(shape.width.linear(a, k)));
+                        }
+                    }
+                    for (i, chunk) in bits.chunks(2048).enumerate() {
+                        let hex: String = chunk
+                            .rchunks(4)
+                            .map(|q| {
+                                let d = q.iter().enumerate().fold(0u32, |acc, (j, &b)| acc | (b as u32) << j);
+                                char::from_digit(d, 16).unwrap().to_ascii_uppercase()
+                            })
+                            .collect();
+                        p.push((format!("mem_init{i}"), format!("{}'h{hex}", chunk.len())));
+                    }
+                    for (k, val) in p {
+                        writeln!(v, "defparam {a}.{k} = {val};")?;
+                    }
+                    writeln!(qsf, "set_location_assignment M4K_X{x}_Y{y} -to {}", atom[name.as_str()])?;
+                }
                 Bel::ClkCtrl { g } => {
                     writeln!(v, "cycloneii_clkctrl {a}(")?;
                     writeln!(v, "  .inclk({{1'b0, 1'b0, 1'b0, {}}}),", net(c, "INCLK", "1'b0"))?;
@@ -846,6 +1114,10 @@ impl Routed {
             // Pins are named after their pad (an I/O atom's `padio`).
             let out = ["COMBOUT", "COUT", "REGOUT", "OUTCLK"].iter().find_map(|p| c.conns.get(*p).and_then(|id| driver.get(id)));
             let out = if matches!(c.bel, Bel::Ioe { .. }) { None } else { out };
+            // A RAM atom is named after its lowest output bit (q1).
+            let out = out.or_else(|| {
+                (0..m4k::COLS).find_map(|k| c.conns.get(&format!("DO{k}")).and_then(|id| driver.get(id))).filter(|_| c.ty == "CY2_M4K")
+            });
             rcf_name.insert(name, out.cloned().unwrap_or_else(|| atom[name.as_str()].clone()));
         }
         let atom = rcf_name;
@@ -939,6 +1211,21 @@ impl Routed {
                             Wire::ClkIn { g } => {
                                 let c = cell_at.get(&Bel::ClkCtrl { g }).context("clock control")?;
                                 format!("dest = ( {}, INCLK[0] );", atom[*c])
+                            }
+                            Wire::M4k { x, y, pin } => {
+                                let c = cell_at.get(&Bel::M4k { x, y }).context("M4K at its pin")?;
+                                let port = match pin {
+                                    M4kPin::In(i) => {
+                                        let ports = M4kShape::of(&self.cells[*c])?.atom_ports()?;
+                                        ports.get(&i).with_context(|| format!("{}: M4K pin {i:?} is no atom port", n.name))?.clone()
+                                    }
+                                    M4kPin::Fast(f) => match M4K_CONTROL_PINS[f as usize].0 {
+                                        "WE" => "PORTAWE".to_string(),
+                                        p => p.to_string(),
+                                    },
+                                    M4kPin::Ctl(_) => bail!("{}: M4K control input as a sink", n.name),
+                                };
+                                format!("dest = ( {}, {port} );", atom[*c])
                             }
                             w => bail!("{}: sink {w:?}", n.name),
                         };

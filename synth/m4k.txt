@@ -1,0 +1,41 @@
+# M4K RAM blocks for yosys' memory_libmap (README "M4K RAM blocks"): 4,608
+# bits, 4096 x 1 down to 128 x 36, synchronous reads and writes on one
+# clock. What the open flow supports so far:
+#
+#   - single port: one address, read-during-write returns the new data
+#     (Quartus' NEW_DATA_NO_NBE_READ, the block's flow-through mode); x1 to
+#     x18 (a single-port x36 is Quartus' packed mode, not supported). A ROM
+#     is a single port that never writes.
+#   - simple dual port: a write port and a read port on the same clock, x1
+#     to x36, the same width on both ports. A read of the address being
+#     written returns the old data: Quartus' OLD_DATA and DONT_CARE give the
+#     same bits (fuzz d8o vs d8), so the block has one behaviour and OLD_DATA
+#     promises it [inferred].
+#
+# Not yet: byte enables, clock enables, output registers, two clocks, true
+# dual port, mixed widths, read enables.
+
+ram block $__CY2_M4K_SP_ {
+    abits 12;
+    widths 1 2 4 9 18 global;
+    cost 64;
+    init any;
+    port srsw "A" {
+        clock posedge;
+        rdwr new;
+    }
+}
+
+ram block $__CY2_M4K_SDP_ {
+    abits 12;
+    widths 1 2 4 9 18 36 global;
+    cost 65;
+    init any;
+    port sw "W" {
+        clock posedge "C";
+        wrtrans all old;
+    }
+    port sr "R" {
+        clock posedge "C";
+    }
+}

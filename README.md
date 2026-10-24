@@ -725,7 +725,8 @@ port B read enable in simple dual port, inverted write enables, clocks or
 clears, packed true dual ports, more than two atoms in a block. Settings
 no design produced (a true-dual port B output clear, clock 1 on an output
 register, clock enable 1 on its own) follow the same rules but are
-unverified. The nextpnr side has no M4K yet.
+unverified. The open flow uses a subset: [M4K in the open
+flow](#m4k-in-the-open-flow).
 
 ### Open flow (phase 6)
 
@@ -749,7 +750,7 @@ xz files:
 | file | size | contents |
 |---|---|---|
 | `device.bin.xz` | 3.2 MB (41.7 MB raw) | magic `C2RE-DB`, format version, then a [postcard](https://postcard.jamesmunns.com/wire-format) encoding of `db::Stored`: the routing graph (376,788 elements, 210,403 templates) and its 7,996,500 routing bits, stored by column as deltas; the asmdb block tables; the 475 bonded user pins of the F672 package with their IOE, bank and dual-purpose role |
-| `chipdb.txt.xz` | 9.3 MB (124.8 MB raw) | `cram chipdb` output, the input of `nextpnr/cyclone2/gen/arch_gen.py` |
+| `chipdb.txt.xz` | 9.3 MB (125.1 MB raw) | `cram chipdb` output, the input of `nextpnr/cyclone2/gen/arch_gen.py` |
 
 `cram db` writes `device.bin.xz`, reads it back (it must re-encode to the
 same bytes), and exports `chipdb.txt.xz` from what it read back, so the
@@ -819,9 +820,10 @@ LE 0 of the LAB below. I/O tiles get IOE bels (data from the IOE's
 `IO_DATA_INPUT` lines, output enable `OE` from its `IO_PIA_TO_OE` lines,
 pad-to-core onto both `IO_DATA_IN` paths or the clock pin's `CLK_BUFFER`;
 dedicated clock inputs have no `OE`), and 16 clock-control bels sit at their
-`CLKBUF_OUT`. Measured: generating it takes 9.5 minutes and 2.6 GB peak
+`CLKBUF_OUT`. The 105 M4K blocks share one tile type `M4K` (details in [M4K
+in the open flow](#m4k-in-the-open-flow)). Measured: generating it takes 9.5 minutes and 2.6 GB peak
 (himbaechel's python generator and bbasm);
-the binary is 242 MB, and nextpnr-himbaechel needs about 330 MB for a
+the binary is 243 MB, and nextpnr-himbaechel needs about 330 MB for a
 small design.
 
 **nextpnr uarch** (`nextpnr/cyclone2/cyclone2.cc`, packaged by
@@ -831,7 +833,8 @@ devshell's `nextpnr-himbaechel`). Cells come from `synth/cyclone2.ys`:
 sync clear gated by the enable), pin buffers (`CY2_IBUF`, `CY2_OBUF`, and
 `CY2_IOBUF` for tri-state outputs and bidirs: yosys' `tribuf` turns
 `oe ? d : 1'bz` into tri-state buffers and `iopadmap -toutpad/-tinoutpad`
-merges them into it); the packer adds clock controls. The port's direction
+merges them into it), M4K RAM blocks (`CY2_M4K`, [below](#m4k-in-the-open-flow));
+the packer adds clock controls. The port's direction
 decides an IOBUF's mode, as in Quartus: on an `output` port the input buffer
 stays off, every bit of an `inout` port is a bidir. Inverters into `OE` and
 `DATAOUT` fold into the IOE (`OE_INVERT`, `DATA_INVERT`), constants into
@@ -891,6 +894,13 @@ makes the fitter keep the routes. Results, observed:
 | uart_tx (115200 8N1 on UART_TXD) | 69 | 217 | 19 s | 100 % | byte-identical | 13.6 ns |
 | picorv32 (RV32I core + ROM, LEDs) | 1,039 | 1,687 | 115 s | 100 % | byte-identical | 0.43 ns |
 | bidir (9 tri-state/bidir pins on GPIO_0 and SRAM_DQ: OE from a switch, inverted, a LUT, a register; open drain; read back to LEDs) | 29 | 169 | 89 s (host at load 50) | 100 % | byte-identical | 16.6 ns |
+| ram (7 M4Ks: ×1 and ×16 single port, ×8, ×32, ×36 simple dual port, ×8 and ×36 ROMs) | 151 | 541 | 17 s | 100 % | byte-identical | 12.8 ns |
+| ram_widths (10 M4Ks: ×2, ×4, ×9, ×18 single port, ×1, ×2, ×4, ×9, ×16, ×18 simple dual port, 4 with initial contents) | 78 | 576 | 372 s (host loaded, mostly waiting) | 100 % | byte-identical | 10.8 ns |
+
+With the M4K tiles in the chip database (2026-10-24) all seven examples
+were rebuilt with the new nextpnr and validated again: all byte-identical.
+picorv32's placement moved (worst setup slack now 0.29 ns, still positive);
+the other pre-M4K examples kept theirs or moved and still match.
 
 Tri-state pins go to Quartus as `cycloneii_io` atoms (its VQM reader takes
 no `?:`), the way Quartus' own VQM writer has them, with inverted enables as
@@ -915,7 +925,66 @@ order flipped that Quartus never saw, run on a DE2 loaded with `just flash`
 (`cram svf` → openFPGALoader, no Altera software); CONF_DONE checked on
 every load. See [JTAG configuration](#jtag-configuration-phase-7).
 
-Gaps: no timing model in nextpnr; no M4K, multipliers or PLLs; I/O is
+#### M4K in the open flow
+
+A memory with synchronous reads goes yosys → `CY2_M4K` → an M4K bel →
+`m4k.rs`'s typed `M4k` → bits, and to Quartus as a `cycloneii_ram_block`
+atom. The subset: single port ×1-×18 (read-during-write returns the new
+data, the block's flow-through mode), simple dual port ×1-×36 on one clock
+with the same width on both ports, ROMs (initial contents on any of them; a
+×36 ROM is Quartus' "rom" atom, which it builds on port B), logical ×8, ×16
+and ×32 as physical ×9, ×18 and ×36.
+
+- **yosys** (`synth/m4k.txt`, a `memory_libmap` library; `synth/m4k_map.v`).
+  libmap's address bus is the block's 12 physical pins, MSB-aligned, and its
+  `INIT` is the 4,608 bits in the block's linear order (word *a* of a ×9 port
+  at `INIT[a*9 +: 9]`, ×1/×2/×4 skipping every ninth position), so the
+  techmap is wiring. A block costs 64, a bit of soft logic 0.025: memories
+  of 2,304 bits or less stay logic. That keeps picorv32's 32 × 32 register
+  file in LUTs as before (the same cells and connections; some internal net
+names differ), and it rules out the
+  memories that would leave a block's top address pin unused, which the
+  flow can't place yet (below).
+- **Mixed-port read-during-write** is declared old data: Quartus' OLD_DATA
+  and DONT_CARE give the same bits (fuzz d8o vs d8), so the block does one
+  thing and OLD_DATA names it **[inf]**.
+- **Chip database**: one tile type `M4K` at logic tile (2x+1, y) of each
+  block. Wires `LI0-81` (the block's `LOCAL_INTERCONNECT`), `BCB0-5` (row
+  clocks), `MB0-35` (`M4K_BUFFER`, element 278), all aliases of graph
+  nodes; `M4K.CTL0-7` (the control inputs, rcf `M4K_LEFT_CONTROL_INPUT`). One
+  bel `M4K` (type `M4K`, z 0): inputs `DI0-35`, `WA0-6`, `WA11`, `RA0-6`,
+  `RA9-11`, `BE0-3` (named after their asmdb mux, `m4k::Input::pin_name`;
+  pips from every line the mux's source map reaches), `CLK0`, `CLK1`,
+  `ENA0`, `ENA1`, `CLR0`, `CLR1`, `WE`, `RE` (pips from the control inputs
+  and row clocks their fast mux takes), outputs `DO0-35` on `MB0-35`.
+- **Packer** (`pack_m4k`): `CY2_M4K`'s logical ports become those pins.
+  Data bit *k* is column *k*: `DI<k>`, `DO<k>`. Address pin *p* is
+  `m4k::Input::addr` (port A: `DI12-15`, `WA11`, `WA0-6`; port B: `DI26`,
+  `DI35`, `RA9-11`, `RA0-6`); pins below the port's width, constant data
+  inputs and unread outputs are dropped; a write enable never driven makes
+  a ROM. Clocks get a clock control like LE clocks. Buffers in front of an
+  M4K input fold away (quartus_map would delete them).
+- **Quartus export**: one atom per block, named `m4k_x<X>_y<Y>`, its width the
+  bits in use (×16 for a ×18 port with columns 16-17 unused), `mem_init0/1/2`
+  in 2,048-bit pieces as Quartus writes them, `M4K_X<X>_Y<Y>` location.
+  Observed with hand-written VQMs (q1, q2): quartus_map keeps a VQM RAM atom
+  whole, named after its first output net, and the rcf names its sinks on
+  that name; bit *k* sits in column *k* (output on `M4K_BUFFER` *k*,
+  contents in that order); the rcf's `ram_sublocations` then lists every
+  output at (0, 0). A dual port must drive `portbrewe` (error 14091), single
+  port and ROM must not (14090). `m4k.rs`'s Quartus frontend reads such
+  atoms too (no sublocation: column = bit), so the oracle's own build of an
+  exported design roundtrips.
+- **Shallower memories** **[obs, one design, q2]**: a 32 × 18 VQM atom (5
+  address bits) gets its address on `WA0-4` (pins 5-9), and its words land
+  at physical word 192 + 2a: unconnected `WA11` reads 0, `WA5`, `WA6` read 1.
+  The rest of the pins' idle levels are unknown, so the packer refuses a
+  constant on a used address pin rather than guess where the contents go.
+
+Gaps: no timing model in nextpnr; M4K only as above (no byte enables,
+clock enables, output registers, clears, two clocks, true dual port,
+mixed widths, packed ×36 single port, memories shallower than their
+block); no multipliers or PLLs; I/O is
 3.3-V LVTTL inputs, outputs, tri-state outputs and bidirs only (no I/O
 registers, no other standards, drive strengths, pull-ups or bus hold; the
 cram model has all of these, the yosys/nextpnr side doesn't); an open
@@ -936,8 +1005,8 @@ device database (`db/`, our own format) and our own tools.
 | 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | LAB grid and its CRAM frame/row placement observed; IOE coordinates and their CRAM/CFF bits from pad/pkg + asmdb; the 105 M4Ks (X13/X26/X52, one per LAB row, 70 rows × 166 frames) and 35 multipliers (X39) placed from the asmdb block lists |
 | 3 | Logic: LUT truth tables, FF modes, carry chains | asmdb decoded. LUT, LE inputs A-D, carry, registers, packing, LAB clocks/CE/aclr/sclr/sload placed by the asmdb, setting values fit on 9 fuzz designs. All 8 held-out counters and all 9 LE fuzz designs byte-identical with the I/O model |
 | 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clocks (pin → clkctrl → GCLK → RCLK → LAB) modelled: graph plus asmdb clkctrl select, checked on 2 clock pins and 4 global nets |
-| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers incl. OE register and power-up high, output enable incl. inversion, tri-state, bidir and open drain, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical (24/24 held-out output-enable designs). Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K: done for Quartus designs (`cram roundtrip`): single port, simple and true dual port, ROM, ×1-×36 and mixed widths, packed ×32/×36 single ports, output registers, clock enables, clears, byte enables, initial contents, RAMs over several blocks; content layout, input pins and settings from the asmdb, values fit on 28 designs; 52 of 53 held-out designs byte-identical (the miss is an LE clock choice). Not in nextpnr yet. Multipliers, PLLs not started |
-| 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins including tri-state and bidirectional ones: `just open-build`, no Quartus involved (packing, base image and chip database from the committed `db/`, no Quartus files at use time). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx, picorv32 and bidir. No timing model, no M4K/multiplier/PLL, no registered I/O |
+| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers incl. OE register and power-up high, output enable incl. inversion, tri-state, bidir and open drain, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical (24/24 held-out output-enable designs). Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K: done for Quartus designs (`cram roundtrip`): single port, simple and true dual port, ROM, ×1-×36 and mixed widths, packed ×32/×36 single ports, output registers, clock enables, clears, byte enables, initial contents, RAMs over several blocks; content layout, input pins and settings from the asmdb, values fit on 28 designs; 52 of 53 held-out designs byte-identical (the miss is an LE clock choice). In the open flow: single port ×1-×18, simple dual port ×1-×36 on one clock, ROMs, initial contents (`examples/ram`, `examples/ram_widths` byte-identical). Multipliers, PLLs not started |
+| 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins including tri-state and bidirectional ones: `just open-build`, no Quartus involved (packing, base image and chip database from the committed `db/`, no Quartus files at use time). M4K RAM (single port, simple dual port, ROM, ×1-×36). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx, picorv32, bidir, ram and ram_widths. No timing model, no multiplier/PLL, no registered I/O, M4K without byte/clock enables, output registers, true dual port |
 | 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | done: `cram svf` writes the JTAG stream (RBF minus its passive-serial preamble) with a CONF_DONE check; openFPGALoader plays it. Open-built designs run on a DE2. Not done: EPCS (non-volatile) programming |
 
 ## Prior art

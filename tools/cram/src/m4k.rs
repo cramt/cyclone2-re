@@ -114,6 +114,10 @@ impl Content {
         let i = col * ROWS + row;
         self.0[i / 64] |= 1 << (i % 64);
     }
+    /// The bit at linear position `l` of the 36-column rows.
+    pub fn get_linear(&self, l: usize) -> bool {
+        self.get(l % COLS * ROWS + l / COLS)
+    }
     pub fn get(&self, i: usize) -> bool {
         self.0[i / 64] >> (i % 64) & 1 == 1
     }
@@ -199,7 +203,42 @@ pub enum Input {
 }
 
 impl Input {
-    fn group(self) -> (i32, i32) {
+    /// Every physical input pin, in chip database order.
+    pub fn all() -> Vec<Input> {
+        let mut v: Vec<Input> = (0..36).map(Input::Data).collect();
+        v.extend((0..7).chain([11]).map(Input::WriteAddr));
+        v.extend((0..7).chain([9, 10, 11]).map(Input::ReadAddr));
+        v.extend((0..4).map(Input::ByteEna));
+        v
+    }
+
+    /// Bel pin name in the chip database (`chipdb.rs`), which the nextpnr
+    /// uarch's packer targets.
+    pub fn pin_name(self) -> String {
+        match self {
+            Input::Data(k) => format!("DI{k}"),
+            Input::WriteAddr(k) => format!("WA{k}"),
+            Input::ReadAddr(k) => format!("RA{k}"),
+            Input::ByteEna(k) => format!("BE{k}"),
+        }
+    }
+
+    pub fn from_pin_name(s: &str) -> Option<Input> {
+        let num = |p: &str| s.strip_prefix(p)?.parse::<u8>().ok();
+        let i = if let Some(k) = num("DI") {
+            Input::Data(k)
+        } else if let Some(k) = num("WA") {
+            Input::WriteAddr(k)
+        } else if let Some(k) = num("RA") {
+            Input::ReadAddr(k)
+        } else {
+            Input::ByteEna(num("BE")?)
+        };
+        Input::all().contains(&i).then_some(i)
+    }
+
+    /// The asmdb source mux (arch type, group) that picks its LAB line.
+    pub fn group(self) -> (i32, i32) {
         match self {
             Input::Data(k) => (arch::RAM_MS_DATA_INPUT, k as i32),
             Input::WriteAddr(k) => (arch::RAM_MS_WRITE_ADDRESS_INPUT, k as i32),
@@ -288,13 +327,18 @@ impl M4kDb {
         Ok(M4kDb { features, content, bases })
     }
 
-    fn feature(&self, t: i32, i: i32) -> Result<&Feature> {
+    pub fn feature(&self, t: i32, i: i32) -> Result<&Feature> {
         self.features.get(&(t, i)).with_context(|| format!("asmdb M4K group {t}/{i} missing"))
     }
 
     fn flat(&self, x: u32, y: u32, off: i32) -> Result<u32> {
         let b = self.bases.get(&(x, y)).with_context(|| format!("no M4K at X{x} Y{y}"))?;
         Ok((*b as i64 + off as i64) as u32)
+    }
+
+    /// Base flat address of block (x, y); feature offsets count from it.
+    pub fn base(&self, x: u32, y: u32) -> Result<u32> {
+        self.flat(x, y, 0)
     }
 
     /// (x, y) of every block.
@@ -711,15 +755,24 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs, half: Option
     }
     let narrow = widths(narrow_port)?;
     let narrow_bits = num(a, &format!("port_{narrow_port}_data_width"))? as usize;
+    // quartus_map keeps an atom from a VQM whole, named after its first
+    // output net; its own atoms sit inside the altsyncram's hierarchy.
+    let vqm_atom = half.is_none() && !a.name.contains('|');
     // Linear position, within one word of the widest port, of bit `bit` of
     // a slice, `idx` narrow words further on (a wide port's data pins on a
     // narrow slice are `PORTADATAIN[idx]`).
     let column = |port: char, bit: u32, idx: u32| -> Result<usize> {
         let key = |owner: &str, p: char, b: u32| subs.get(&(owner.to_string(), p, b));
-        let (_, s) = *key(&prefix, port, slice_of(port, bit))
+        // An atom read from a VQM (`cram quartus-export`) isn't split into
+        // per-bit slices: the rcf lists its output nets, each at (0, 0), and
+        // bit k sits in column k of the narrow word (VQM experiment q1:
+        // output k on M4K_BUFFER k, contents in that order).
+        let (_, s) = key(&prefix, port, slice_of(port, bit))
             .or_else(|| key(&a.name, port, bit))
             .or_else(|| if bit == 0 { key(&a.name, '*', 0) } else { None })
             .or_else(|| key(&prefix, cell_port, slice_of(cell_port, bit)))
+            .copied()
+            .or_else(|| vqm_atom.then_some((0, bit % narrow_bits as u32)))
             .with_context(|| format!("no ram_sublocation for port {port} bit {bit}"))?;
         // A packed half's slots count both halves' 36 columns.
         let s = if half.is_some() { s as usize % 18 } else { s as usize };
@@ -756,7 +809,7 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs, half: Option
             // cell, bit `idx` of the port.
             let (owner, cport, cbit) = cell_key(&d.cell);
             let port_idx = idx;
-            let (cbit, idx) = if owner == a.name {
+            let (cbit, idx) = if owner == a.name || vqm_atom {
                 (idx, 0)
             } else {
                 match atom_bit(cport, cbit) {
@@ -795,14 +848,14 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs, half: Option
                     // word of the cell's port inside one word of this port.
                     let b = port == "PORTBDATAIN";
                     let w = widths(if b { 'b' } else { 'a' })?;
-                    ensure!(cport == cell_port || owner == a.name, "data sink on cell of port {cport}");
+                    ensure!(cport == cell_port || owner == a.name || vqm_atom, "data sink on cell of port {cport}");
                     let col = w.column(column(if b { 'b' } else { 'a' }, cbit, idx)?);
                     let inp = Input::Data((col + if b || half == Some(1) { 18 } else { 0 }) as u8);
                     put_input(&mut m.inputs, inp, line()?)?;
                 }
                 "PORTABYTEENAMASKS" => {
                     // On an atom cell the index is the byte, not a bit.
-                    let byte = if owner == a.name { port_idx as usize } else { widths('a')?.column(column('a', cbit, idx)?) / 9 };
+                    let byte = if owner == a.name || vqm_atom { port_idx as usize } else { widths('a')?.column(column('a', cbit, idx)?) / 9 };
                     let inp = Input::ByteEna(byte as u8);
                     put_input(&mut m.inputs, inp, line()?)?;
                 }
