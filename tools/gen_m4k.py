@@ -17,9 +17,8 @@ Config keys (all optional):
   deep     n: n times the depth of one block (address decoding over blocks)
   byteena  byte enables on port A (widths 16/18/32/36)
   init     content: {"seed": n} random, {"bits": [[addr, bit], ...]} those
-           bits set, {"word": k} each word = its address xor k; absent = no
-           init file (all zeros)
-  loc      "M4K_X26_Y20" location assignment, or absent
+           bits set, {"word": k} each word = its address xor k, {"linear": k}
+           bit b of word a set iff bit k of a*wa+b is; absent = all zeros
 """
 import json, pathlib, random, sys
 
@@ -160,7 +159,5 @@ v.append("endmodule")
 
 qsf = [l for l in (pathlib.Path(__file__).parent.parent / "examples/de2.qsf").read_text().splitlines()
        if l.startswith("set_location_assignment")]
-if cfg.get("loc"):
-    qsf.append(f"set_location_assignment {cfg['loc']} -to \"altsyncram:ram|altsyncram_*:auto_generated|ram_block1a0\"")
 (out / "assignments.qsf").write_text("\n".join(qsf) + "\n")
 (out / "config.json").write_text(json.dumps(cfg) + "\n")

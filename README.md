@@ -310,8 +310,8 @@ frame bit = byte * 8 + lane     (LSB first, the order rbfdiff prints)
   row; LEs 8-15 are their mirror image about the LAB's last row; rows
   32-37 sit between.
 - The first LUT frame of LAB column X is 78 + the widths of columns 1..X−1:
-  35 frames per LAB column, 166 per M4K/multiplier column (13, 26, 52), 27
-  for the centre column (39), plus 4 unexplained frames before columns 16
+  35 frames per LAB column, 166 per M4K column (13, 26, 52), 27
+  for the centre column (39, the multipliers), plus 4 unexplained frames before columns 16
   and 50 (mirror images about the centre). Checked on all 60 LAB columns.
 - LUT entry `p = A + 2B + 4C + 8D` of `LCCOMB_X_Y_N`: frame
   `lut_frame(X) + 3 − B − 2C`, LE row `3 − A − 2D` (mirrored for LEs
@@ -454,8 +454,8 @@ clears `LAB_INVERT` 5. The model now tracks port inversion.
 
 Not covered: LAB clocks from local routing rather than a global, two
 different aclr signals in one LAB, inverted aclr, a second clock domain
-sharing a buffer, `LE_USE_REG_CASCADE_ARM` (never seen changing), M4K,
-multipliers and PLLs. These are flagged as `unmodelled` rather than
+sharing a buffer, `LE_USE_REG_CASCADE_ARM` (never seen changing),
+multipliers and PLLs (M4K: [below](#m4k-ram-blocks-phase-5)). These are flagged as `unmodelled` rather than
 guessed.
 
 ### I/O pins (phase 5)
@@ -554,6 +554,131 @@ clears and clock enables, an OE register without an output register,
 programmable delays the fitter only picks under timing pressure, and
 PCI clamp (`IO_USE_PCI_DIODE_CLAMP`, never seen set).
 
+### M4K RAM blocks (phase 5)
+
+Every M4K a Quartus design uses is configured from the device DB:
+`tools/cram/src/m4k.rs`. Tags as in [docs/ddb-format.md](docs/ddb-format.md):
+**[obs]** observed, **[inf]** inferred.
+
+**Where they are (asmdb, [obs]):**
+
+- 105 blocks, asmdb block type 39, one per LAB row in LAB-grid columns
+  X13, X26 and X52 (Quartus `M4K_X52_Y2`). A block is 70 CRAM rows × 166
+  frames based at `lab_row(y)` and its highest frame (641, 1231, 2268), so
+  X13 is frames 476-641, X26 1066-1231, X52 2103-2268: the three 166-frame
+  columns of the tile layout are all M4K. The 35 multipliers (block type
+  41, 70 × 27) are in the 27-frame centre column X39, not with the M4Ks.
+- 132 arch groups name everything an M4K configures: 88 input muxes
+  (`RAM_MS_DATA_INPUT` 0-35, `_DATA_INPUT_B` 0-17, `_WRITE_ADDRESS_INPUT`,
+  `_READ_ADDRESS_INPUT`, `_BYTE_ENABLE_INPUT(_B)`, `_ADDRESS_STALL_INPUT(_B)`,
+  `RAM_PIA_TO_INPUT_YGR` 0-7), the control fast muxes (`RAM_CLOCK_`, `_CE_`,
+  `_CLEAR_`, `_WE_`, `_RE_FAST_MUX`), mode bits, and
+  `RAM_CONTENT_YGR_MEAB`, a 4,608-bit "RAM" mux that lists the memory
+  bits. `DATA_INPUT` 18-35 have the same bit lists as `DATA_INPUT_B` 0-17
+  and `BYTE_ENABLE_INPUT` 2-3 as `_B` 0-1: one physical pin each.
+- Routing: the LAB lines at an M4K tile (rcf `LOCAL_INTERCONNECT`, index up
+  to 80) and its data outputs (rcf `M4K_BUFFER`, element 278) are graph
+  nodes, so `cram`'s routing covers them unchanged once 278 is in the rcf
+  table. Each input mux is a two-level source mux over the lines (87
+  sources, `aux`/`next_mux_selection` like `LE_LUT_INPUT`). Control signals
+  either come from a row clock (`BLK_CLK_BUF` 0-5) or through one of 8
+  control inputs (rcf `M4K_LEFT_CONTROL_INPUT` k = `RAM_PIA_TO_INPUT_YGR` k,
+  fed from a line).
+
+**Memory contents ([obs]):** found with 12 designs of a 512 × 8 RAM whose
+initial word *a* has bit *b* set iff bit *k* of `8a + b` is set
+(`"init": {"linear": k}`), then checked on every fuzz design's random
+contents. The array is 128 rows × 36 columns; `RAM_CONTENT_YGR_MEAB` bit
+`col × 128 + row`, stored as written (not inverted). A port of physical
+width P = 36, 18 or 9 sees word *a*, column *s* at linear position
+`a·P + s` of the 36-column rows; widths 1, 2 and 4 skip every ninth column
+(`l = a·P + s`, position `l/8·9 + l%8`). Logical ×8, ×16 and ×32 ports are
+physically ×9, ×18 and ×36. Which column holds which data bit is the
+fitter's choice: the rcf's `section ram_sublocations` gives each output
+bit's column ("slot"), e.g. a simple dual port with bit 1 in the ninth
+column. Slots count in the narrower port's words; a wider port's bit *k*
+sits in narrow word `k / narrow width`. The post-fit netlist's `mem_init1 .
+mem_init0` hold the contents in the words of the port whose outputs the rcf
+names (A for single port and true dual port, B for simple dual port).
+
+**Physical pins ([obs]):** an address of *n* bits uses pins `12 − n ..= 11`
+(MSB-aligned). Port A pins 0-3 are `DATA_INPUT` 12-15 (unused data pins
+below ×18), pin 4 `WRITE_ADDRESS_INPUT` 11, pins 5-11 `WRITE_ADDRESS_INPUT`
+0-6. Port B pins 0, 1 are `DATA_INPUT` 26, 35, pins 2-4
+`READ_ADDRESS_INPUT` 9-11, pins 5-11 `READ_ADDRESS_INPUT` 0-6. Data in:
+port A column *c* on `DATA_INPUT` *c*, port B column *c* on 18 + *c*.
+A port A data bit in column *c* has byte enable `c / 9`.
+
+**Settings ([obs], from 28 designs: `tools/gen_m4k.py`, configs in
+`tools/m4k_jobs.txt`):**
+
+| group | value |
+|---|---|
+| `RAM_ENABLE`, `RAM_ENABLE_CE_INPUT(_B)`, `_CE_OUTPUT(_B)` | 1 in every used block |
+| `RAM_USE_EXTENDED_WRITE_PULSE_MAGELLAN` | 11, except a true dual port whose port A never writes (one design) |
+| `RAM_DATA_WRITE_MODE(_B)` | one-hot physical width of port A (B): ×1 bit 0 … ×36 bit 5 |
+| `RAM_USE_TRUE_DUAL_PORT_MODE` | single port (ROM included) and true dual port |
+| `RAM_FLOW_THROUGH_MODE(_B)` | single port with a write enable, true dual port |
+| `RAM_REG_DATA_OUT(_B)` | 1 = output unregistered; in simple dual port the read port uses the A group, a ×36 read both |
+| `RAM_SELECT_CLK_DATA_OUT(_B)`, `RAM_USE_CLR_DATA_OUT`, `RAM_SELECT_CLR_DATA_OUT` | output register clock / clear in use / which clear |
+| `RAM_SELECT_CLK_READ_ENABLE_READ_ADDRESS_B` | port B address clock (unused: 1) |
+| `RAM_SELECT_CLK_BYTE_ENABLE_DATA_B` | port B input clock; 0 for a ×36 simple-dual write, which borrows port B's data registers |
+| `RAM_WRITE_ENABLE_INVERT`, `RAM_READ_ENABLE_INVERT` | 1 for a non-inverted port A / port B write enable |
+| `RAM_CE_INVERT` k | 1 for an inverted clock enable (one design, `!wren`) |
+| `RAM_USE_PACKED_MODE` | single port ×32/×36 (below) |
+| fast muxes | the asmdb map value of the source *is* the bit pattern: sources 0-7 control inputs, 8-13 row clocks (clock from row clock 5 = 130 = bits 1 and 7) |
+| `RAM_USAGE_MODE` | never changes from the unused block's value |
+
+How Quartus builds the less obvious configurations ([obs]):
+
+- A single port ×32/×36 is "packed": two ×18 atoms in one block, port A
+  on words 128-255 and port B on 0-127 of a 256 × 18 array, one atom's bits
+  not contiguous (0-8 and 27-35). The rcf sublocation's middle field is the
+  half.
+- A ×36 ROM is a read-only port B (`RAM_DATA_WRITE_MODE_B`, read address
+  pins).
+- A simple dual port with two clocks becomes a true dual port with port A
+  reading.
+- RAMs deeper than a block put one atom in each block with LE address
+  decoding and output muxes; the rcf then names output bits after the atom
+  (`ram_block1a1~PORTADATAOUT3`) instead of per-bit slices (`q_a[3]`).
+  Wider ones split the bits (`port_a_first_bit_number`).
+
+Found along the way, outside the M4K: a register packed beside an LUT that
+reads the register on datac while sdata takes the routed datac
+(`LE_USE_REGISTER_FEEDBACK`); clock controls fed from the core
+(`LOCAL_INTERCONNECT` → `BLOCK_INPUT_MUX` → `CLKBUF_IN` 4) through the
+`CLKBUF_INTERFACE_COREIN` source mux of their G, and from a user pin
+through the clock delay control (`CLKBUF_IN` 6, select code 5); rcf cell
+names with `entity:` hierarchy parts. The 179 earlier designs still
+roundtrip 178/179 (r1 as before), and the open-flow examples pack to the
+same RBFs.
+
+**Validation, observed** (`cram roundtrip -`):
+
+| designs | what varies | byte-identical |
+|---|---|---|
+| fit: a0, s1-s36, s8r/e/c/n, s16b, d1-d36, d8r/k/o, d32x8, d8x32, b8, b18, b16x4, r8, r36 | one feature each: width 1-36, mode, output register, clock enable, clear, byte enables, read-during-write, mixed widths, ROM | 28 / 28 |
+| held out h0-h13 (random configs, 1-2 blocks) | first pass: 3 of h0-h6; RAMs split over blocks were missing. After adding them (from h0, h1, h2, h5): M4K bits right in all 14 | 13 / 14 |
+| held out v0-v12 (v2, v13 don't compile: dual-clock true dual port is unsupported in 13.0, an unused aclr) | M4K bits right in 12/12 on first sight; v5, v11 missed two clock-control bits (a core-fed global clear), now modelled from them | 12 / 12 |
+| held out w0-w13 | first pass 13/14: w13 (256 × 36 over two blocks) had its two ×18 atoms' bits in the wrong order, the non-contiguous split packed blocks also show. Now modelled from w13 | 14 / 14 |
+| held out x0-x13 (x9 doesn't compile: dual clock with a ×36 port) | first pass 11/12: x6 (registered ×36 read) sets both ports' output register groups, now modelled; x13, the same case, was run after the fix | 13 / 13 |
+
+Over all 53 held-out designs that compile: 52 byte-identical; the M4K bits
+were right the first time cram met them in 47 (misses: h0, h1, h2, h5,
+w13, x6) and are right in all 53 now.
+
+The h2 miss is an LE fitter choice, not M4K: which LAB clock a LAB with
+two clocks and no enables gives each (`logic::clock_slots`, fit on 7 LABs,
+says lowest row clock first; h2's LAB took row clock 5 before 2).
+
+Not covered, so `cram` reports the block as unmodelled: address stall,
+port B read enable in simple dual port, inverted write enables, clocks or
+clears, packed true dual ports, more than two atoms in a block. Settings
+no design produced (a true-dual port B output clear, clock 1 on an output
+register, clock enable 1 on its own) follow the same rules but are
+unverified. The nextpnr side has no M4K yet.
+
 ### Open flow (phase 6)
 
 Verilog → yosys → nextpnr → `cram pack` → `top.rbf`, with no Quartus
@@ -601,7 +726,9 @@ routing and compares (below).
 **Physical netlist** (`tools/cram/src/phys.rs`). What a placed and routed
 design configures in device terms: LE configs (LUT mask over physical
 inputs, input sources, carry, register and its LAB clock slot), LAB-wide
-settings, clock controls, every used pin's IOE settings, and routed nets as
+settings, clock controls, every used pin's IOE settings, M4K blocks (mode
+and port widths, output registers, control sources, which LAB line feeds
+each input pin, the 4,608 content bits), and routed nets as
 routing-graph edges. A `Pip` can only be built from two nodes the graph
 connects. `bits()` turns it into CRAM. Two frontends build it:
 `quartus.rs` (post-fit netlist + rcf + qsf, what `cram assemble` and
@@ -735,10 +862,10 @@ device database (`db/`, our own format) and our own tools.
 |---|-------|--------|
 | 0 | Sandboxed oracle: generated design → chipsmith → `.sof`/`.rbf`, no network | done: `tools/oracle.sh`, verified offline |
 | 1 | Container format: SOF/RBF framing, header, CRC, frame layout | RBF layout and every check word known: frames 24+ CRC-16, raw frames 0-23 = 6 CRC'd frames sent 4× (the CFF bits), `cram assemble` writes all of them; header option words not decoded; SOF not looked at |
-| 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | LAB grid and its CRAM frame/row placement observed; IOE coordinates and their CRAM/CFF bits from pad/pkg + asmdb; M4K/multiplier/clock columns known only as frame widths |
+| 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | LAB grid and its CRAM frame/row placement observed; IOE coordinates and their CRAM/CFF bits from pad/pkg + asmdb; the 105 M4Ks (X13/X26/X52, one per LAB row, 70 rows × 166 frames) and 35 multipliers (X39) placed from the asmdb block lists |
 | 3 | Logic: LUT truth tables, FF modes, carry chains | asmdb decoded. LUT, LE inputs A-D, carry, registers, packing, LAB clocks/CE/aclr/sclr/sload placed by the asmdb, setting values fit on 9 fuzz designs. All 8 held-out counters and all 9 LE fuzz designs byte-identical with the I/O model |
 | 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clocks (pin → clkctrl → GCLK → RCLK → LAB) modelled: graph plus asmdb clkctrl select, checked on 2 clock pins and 4 global nets |
-| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical. Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K, multipliers, PLLs not started |
+| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical. Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K: done for Quartus designs (`cram roundtrip`): single port, simple and true dual port, ROM, ×1-×36 and mixed widths, packed ×32/×36 single ports, output registers, clock enables, clears, byte enables, initial contents, RAMs over several blocks; content layout, input pins and settings from the asmdb, values fit on 28 designs; 52 of 53 held-out designs byte-identical (the miss is an LE clock choice). Not in nextpnr yet. Multipliers, PLLs not started |
 | 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins: `just open-build`, no Quartus involved (packing, base image and chip database from the committed `db/`, no Quartus files at use time). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx and picorv32. No timing model, no M4K/multiplier/PLL, no bidirectional or registered I/O |
 | 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | done: `cram svf` writes the JTAG stream (RBF minus its passive-serial preamble) with a CONF_DONE check; openFPGALoader plays it. Open-built designs run on a DE2. Not done: EPCS (non-volatile) programming |
 

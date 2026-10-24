@@ -367,8 +367,9 @@ impl M4k {
                 }
                 // The read data leaves through the port-A output register
                 // group (fuzz: a registered port B clears REG_DATA_OUT, not
-                // REG_DATA_OUT_B).
-                (read.out_reg, None)
+                // REG_DATA_OUT_B). A x36 read uses both groups, columns 18-35
+                // leaving through port B's (x6).
+                (read.out_reg, if read.width == Width::X36 { read.out_reg } else { None })
             }
             Mode::TrueDual { a, b, b_clock } => {
                 for t in [arch::RAM_USE_TRUE_DUAL_PORT_MODE, arch::RAM_FLOW_THROUGH_MODE, arch::RAM_FLOW_THROUGH_MODE_B] {
