@@ -422,6 +422,20 @@ values. **[obs]** for everything below unless tagged.
   `cram blank` writes.
 - `RAM_USAGE_MODE` (26 bits, map of 5) never changed in any design;
   what it encodes is open.
+- Which lines each source mux reaches (the sources whose map entry is ≥ 0;
+  the block's tile has `LOCAL_INTERCONNECT` 0-81, the muxes reach 0-80): the
+  address and byte-enable muxes (`WRITE_ADDRESS_INPUT` 0-6,
+  `READ_ADDRESS_INPUT` 0-6, `BYTE_ENABLE_INPUT`) take lines 0-14 and 38-49;
+  the data inputs, `WRITE_ADDRESS_INPUT` 11, `READ_ADDRESS_INPUT` 9-11 and
+  the control inputs (`RAM_PIA_TO_INPUT_YGR`) take 24-30 lines of 15-37
+  and 50-80, in two interleaved sets. The chip database's `M4K` tile type
+  (`cram chipdb`) has one pip per reachable source.
+- Fast-mux sources (map index → value): clock 0/1 take control inputs 0
+  and 1 and row clocks 0-5; clock enables control inputs 2, 3 and row clock
+  0 only; clear 0/1 control inputs 4, 5 and the row clocks; write enable and
+  port B write enable control inputs 6, 7 and the row clocks. Index 14 of
+  the clear and write-enable maps is no control input or row clock; what it
+  selects is unknown.
 
 libddb_bcm2bits.so reads `*.bcm.xml` files. No such files exist for
 `cycloneii`, so it plays no part in this family. **[inf]**

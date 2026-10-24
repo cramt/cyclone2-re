@@ -201,6 +201,99 @@ fn lab_tile(db: &Db) -> Result<TileType> {
     Ok(t)
 }
 
+/// LOCAL_INTERCONNECT lines at an M4K tile (0-81; the input muxes reach
+/// 0-80).
+pub const M4K_LINES: usize = 82;
+pub const M4K_OUTPUTS: usize = 36;
+
+/// The M4K's physical input pins: bel pin name and the asmdb source mux
+/// (arch type, group) that selects its LAB line. `DATA_INPUT` 18-35 and
+/// `BYTE_ENABLE_INPUT` 2-3 are the same muxes as `_B` 0-17 / 0-1 (m4k.rs).
+pub fn m4k_input_pins() -> Vec<(String, i32, i32)> {
+    crate::m4k::Input::all()
+        .into_iter()
+        .map(|i| {
+            let (t, g) = i.group();
+            (i.pin_name(), t, g)
+        })
+        .collect()
+}
+
+/// The M4K's control pins and the fast mux (arch type, group) feeding each:
+/// sources 0-7 are the 8 control inputs (`CTL<k>`), 8-13 the row clocks.
+pub const M4K_CONTROL_PINS: [(&str, i32, i32); 8] = [
+    ("CLK0", arch::RAM_CLOCK_FAST_MUX, 0),
+    ("CLK1", arch::RAM_CLOCK_FAST_MUX, 1),
+    ("ENA0", arch::RAM_CE_FAST_MUX, 0),
+    ("ENA1", arch::RAM_CE_FAST_MUX, 1),
+    ("CLR0", arch::RAM_CLEAR_FAST_MUX, 0),
+    ("CLR1", arch::RAM_CLEAR_FAST_MUX, 1),
+    ("WE", arch::RAM_WE_FAST_MUX, -1),
+    ("RE", arch::RAM_RE_FAST_MUX, -1),
+];
+
+/// The shared M4K tile type: one bel `M4K` (type `M4K`) whose input pins
+/// sit behind the block's source muxes over its LAB lines (`LI<l>`), whose
+/// control pins take a control input (`M4K.CTL<k>`, itself fed from a line
+/// by `RAM_PIA_TO_INPUT_YGR` k) or a row clock (`BCB<b>`), and whose
+/// outputs are the M4K_BUFFER elements (`MB<k>`, column k of the read
+/// word).
+fn m4k_tile(db: &Db) -> Result<TileType> {
+    let mut t = TileType::default();
+    for l in 0..M4K_LINES {
+        t.wire(&format!("LI{l}"), "LOCAL_INTERCONNECT");
+    }
+    for b in 0..6 {
+        t.wire(&format!("BCB{b}"), "BLK_CLK_BUF");
+    }
+    for k in 0..M4K_OUTPUTS {
+        t.wire(&format!("MB{k}"), "M4K_BUFFER");
+    }
+    let lines = |at: i32, grp: i32| -> Result<Vec<usize>> {
+        let f = db.m4k.feature(at, grp)?;
+        let aux = f.aux.as_ref().context("M4K input is not a source mux")?;
+        Ok((0..aux.len().min(M4K_LINES)).filter(|&s| aux[s] >= 0 && f.source_bits(0, s).is_ok()).collect())
+    };
+    let mut pins = Vec::new();
+    for k in 0..8 {
+        let w = format!("M4K.CTL{k}");
+        t.wire(&w, "M4K_CONTROL");
+        for s in lines(arch::RAM_PIA_TO_INPUT_YGR, k)? {
+            t.pip(&format!("LI{s}"), &w);
+        }
+    }
+    for (pin, at, grp) in m4k_input_pins() {
+        let w = format!("M4K.{pin}");
+        t.wire(&w, "M4K_INPUT");
+        for s in lines(at, grp)? {
+            t.pip(&format!("LI{s}"), &w);
+        }
+        pins.push((pin, w, false));
+    }
+    for (pin, at, grp) in M4K_CONTROL_PINS {
+        let w = format!("M4K.{pin}");
+        t.wire(&w, "M4K_INPUT");
+        let f = db.m4k.feature(at, grp)?;
+        let aux = f.aux.as_ref().context("M4K fast mux without source map")?;
+        for (s, &a) in aux.iter().enumerate() {
+            match s {
+                _ if a < 0 => {}
+                0..=7 => t.pip(&format!("M4K.CTL{s}"), &w),
+                8..=13 => t.pip(&format!("BCB{}", s - 8), &w),
+                // Source 14 of the clear and write-enable muxes: not a
+                // control input or row clock; what it is is unknown.
+                _ => {}
+            }
+        }
+        pins.push((pin.to_string(), w, false));
+    }
+    for k in 0..M4K_OUTPUTS {
+        pins.push((format!("DO{k}"), format!("MB{k}"), true));
+    }
+    t.bels.push(("M4K".into(), "M4K".into(), 0, pins));
+    Ok(t)
+}
+
 pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
     let dev = &db.dev;
     let r = &dev.routing;
@@ -271,6 +364,20 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
         }
         for b in 0..6 {
             alias(find(x, y, 560, 0, b)?, format!("BCB{b}"));
+        }
+    }
+    let m4ks = db.m4k.locs();
+    let m4k_set: BTreeSet<(u32, u32)> = m4ks.iter().copied().collect();
+    for &(x, y) in &m4ks {
+        let mut alias = |node: usize, name: String| members[node].push((2 * x + 1, y, name));
+        for l in 0..M4K_LINES {
+            alias(find(x, y, 276, 0, l as i16)?, format!("LI{l}"));
+        }
+        for b in 0..6 {
+            alias(find(x, y, 560, 0, b)?, format!("BCB{b}"));
+        }
+        for k in 0..M4K_OUTPUTS {
+            alias(find(x, y, 278, 0, k as i16)?, format!("MB{k}"));
         }
     }
     let mut ltiles: BTreeMap<(u32, u32), TileType> = BTreeMap::new();
@@ -360,12 +467,14 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
     }
     for xy in ltiles.keys() {
         ensure!(!lab_set.contains(xy), "LAB tile X{} Y{} also holds I/O or clock control", xy.0, xy.1);
+        ensure!(!m4k_set.contains(xy), "M4K tile X{} Y{} also holds I/O or clock control", xy.0, xy.1);
     }
 
     // Write.
     writeln!(w, "chip {WIDTH} {HEIGHT}")?;
     TileType::default().write("NULL", w)?;
     lab_tile(db)?.write("LAB", w)?;
+    m4k_tile(db)?.write("M4K", w)?;
     for ((x, y), t) in &rtiles {
         t.write(&format!("R{x}_{y}"), w)?;
     }
@@ -379,6 +488,8 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
                 rtiles.contains_key(&(x, y)).then(|| format!("R{x}_{y}"))
             } else if lab_set.contains(&(x, y)) {
                 Some("LAB".into())
+            } else if m4k_set.contains(&(x, y)) {
+                Some("M4K".into())
             } else {
                 ltiles.contains_key(&(x, y)).then(|| format!("L{x}_{y}"))
             };

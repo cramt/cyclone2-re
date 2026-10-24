@@ -9,6 +9,14 @@ synth -flatten -run :fine -top top
 # for undefined and would drop the enable). iopadmap merges them into the
 # pin buffers.
 tribuf
+# Memories with synchronous reads into M4K blocks where synth/m4k.txt allows
+# it; the rest (asynchronous reads, unsupported shapes) into registers and
+# LUTs. A block costs 64, a bit of logic 0.025: memories of 2,304 bits or
+# less stay logic. Those are exactly the ones that would leave a block's top
+# address pin unused (depth at most half the block's at that width), which
+# the flow can't place yet (README "M4K in the open flow").
+memory_libmap -lib synth/m4k.txt -logic-cost-ram 0.025 -logic-cost-rom 0.025
+techmap -map synth/m4k_map.v
 memory_map
 opt -full
 techmap -map +/techmap.v -map synth/arith_map.v

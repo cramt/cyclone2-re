@@ -15,6 +15,11 @@
  *   CY2_IOBUF   tri-state output or bidir: PAD = OE ? DATAOUT : z, COMBOUT =
  *               PAD (unconnected on an output). OE_INVERT / DATA_INVERT
  *               fold inverters into the IOE, OE_CONST / OUT_CONST constants.
+ *   CY2_M4K     M4K RAM block (synth/m4k_map.v): CLK, A_ADDR[11:0],
+ *               A_DATAIN[35:0], A_WE, B_ADDR[11:0] -> DATAOUT[35:0]; MODE
+ *               "SINGLE" | "SIMPLE_DUAL", WIDTH 1/2/4/9/18/36, INIT (4,608
+ *               content bits in physical order). Packed onto the physical
+ *               pins of the M4K bel (pack_m4k).
  *   CLKCTRL     global clock control, inserted here on every clock net.
  */
 
@@ -80,6 +85,7 @@ struct Cyclone2Impl : HimbaechelAPI
     void pack() override
     {
         pack_io();
+        pack_m4k();
         pack_constants();
         pack_lut1();
         pack_lut_ff();
@@ -187,6 +193,132 @@ struct Cyclone2Impl : HimbaechelAPI
             ctx->bindBel(bel, ci, STRENGTH_LOCKED);
             log_info("    %s -> PIN_%s\n", port.c_str(), pin.c_str());
         }
+    }
+
+    // M4K: the logical ports synth/m4k_map.v gives a CY2_M4K become the
+    // block's physical pins (bel pins of the chip database's M4K bel, named
+    // after the asmdb input muxes, chipdb.rs `m4k_input_pins`):
+    //   CLK -> CLK0, A_WE -> WE, A_DATAIN[c] -> DI<c>, DATAOUT[c] -> DO<c>,
+    //   address pin p of port A / B -> m4k_addr_pin (m4k.rs `Input::addr`).
+    // An n-bit address uses pins 12 - n ..= 11; libmap ties the pins below to
+    // 0 and they are dropped, as are data bits past WIDTH and constant data
+    // inputs. A_WE never driven is a ROM.
+    static int m4k_addr_bits(int width)
+    {
+        switch (width) {
+        case 1:
+            return 12;
+        case 2:
+            return 11;
+        case 4:
+            return 10;
+        case 9:
+            return 9;
+        case 18:
+            return 8;
+        case 36:
+            return 7;
+        default:
+            return -1;
+        }
+    }
+
+    // Port A's low address pins are data inputs 12-15, port B's data inputs
+    // 26 and 35 and read address 9-11 (fuzz, m4k.rs).
+    static std::string m4k_addr_pin(bool port_b, int p)
+    {
+        if (!port_b)
+            return p < 4 ? stringf("DI%d", 12 + p) : p == 4 ? "WA11" : stringf("WA%d", p - 5);
+        return p == 0 ? "DI26" : p == 1 ? "DI35" : p < 5 ? stringf("RA%d", 7 + p) : stringf("RA%d", p - 5);
+    }
+
+    void pack_m4k()
+    {
+        int n_blocks = 0;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type != id_CY2_M4K)
+                continue;
+            n_blocks++;
+            std::string mode = ci->params.at(id_MODE).as_string();
+            int width = int(ci->params.at(id_WIDTH).as_int64());
+            int abits = m4k_addr_bits(width);
+            bool dual = mode == "SIMPLE_DUAL";
+            if (abits < 0 || !(dual || mode == "SINGLE"))
+                log_error("M4K %s: mode %s width %d is not supported\n", ctx->nameOf(ci), mode.c_str(), width);
+            if (!dual && width == 36)
+                log_error("M4K %s: a x36 single port (Quartus' packed mode) is not supported\n", ctx->nameOf(ci));
+            auto constant = [&](const NetInfo *n) {
+                return !n || (n->driver.cell && n->driver.cell->type.in(ctx->id("GND"), ctx->id("VCC")));
+            };
+            NetInfo *we = ci->getPort(id_A_WE);
+            bool writes = !constant(we);
+            if (we && !writes && we->driver.cell->type == ctx->id("VCC"))
+                log_error("M4K %s: write enable tied high is not supported\n", ctx->nameOf(ci));
+            if (dual && !writes && width != 36)
+                log_error("M4K %s: a read-only simple dual port narrower than x36 is not supported\n", ctx->nameOf(ci));
+            // (logical port, net) -> physical pin, or drop.
+            std::vector<std::pair<IdString, NetInfo *>> old;
+            for (auto &p : ci->ports)
+                old.emplace_back(p.first, p.second.net);
+            std::vector<std::pair<std::string, NetInfo *>> pins;
+            std::vector<std::pair<std::string, NetInfo *>> outs;
+            for (auto &[port, net] : old) {
+                ci->disconnectPort(port);
+                ci->ports.erase(port);
+                std::string name = port.str(ctx);
+                int idx = -1;
+                std::string base = name;
+                if (auto b = name.find('['); b != std::string::npos) {
+                    base = name.substr(0, b);
+                    idx = std::stoi(name.substr(b + 1));
+                }
+                if (base == "DATAOUT") {
+                    // Read bits nothing uses stay off the routing (and out
+                    // of the atom width Quartus is given, cram nextpnr.rs).
+                    if (idx < width && net && !net->users.empty())
+                        outs.emplace_back(stringf("DO%d", idx), net);
+                    continue;
+                }
+                if (base == "CLK") {
+                    if (constant(net))
+                        log_error("M4K %s: clock not driven\n", ctx->nameOf(ci));
+                    pins.emplace_back("CLK0", net);
+                } else if (base == "A_WE") {
+                    if (writes)
+                        pins.emplace_back("WE", net);
+                } else if (base == "A_DATAIN") {
+                    if (writes && idx < width && !constant(net))
+                        pins.emplace_back(stringf("DI%d", idx), net);
+                } else if (base == "A_ADDR" || base == "B_ADDR") {
+                    bool port_b = base == "B_ADDR";
+                    // A read-only x36 simple dual port reads on port B; port
+                    // A then has nothing.
+                    if ((port_b && !dual) || (!port_b && dual && !writes) || idx < 12 - abits)
+                        continue;
+                    if (constant(net))
+                        log_error("M4K %s: address pin %s[%d] is a constant; memories shallower than their M4K "
+                                  "configuration are not supported\n",
+                                  ctx->nameOf(ci), base.c_str(), idx);
+                    pins.emplace_back(m4k_addr_pin(port_b, idx), net);
+                } else {
+                    log_error("M4K %s: unknown port %s\n", ctx->nameOf(ci), name.c_str());
+                }
+            }
+            for (auto &[pin, net] : pins) {
+                IdString id = ctx->id(pin);
+                if (ci->ports.count(id))
+                    log_error("M4K %s: pin %s used twice\n", ctx->nameOf(ci), pin.c_str());
+                ci->addInput(id);
+                ci->connectPort(id, net);
+            }
+            for (auto &[pin, net] : outs) {
+                ci->addOutput(ctx->id(pin));
+                ci->connectPort(ctx->id(pin), net);
+            }
+        }
+        if (n_blocks)
+            log_info("Packed %d M4K blocks.\n", n_blocks);
     }
 
     // Constants have no driver in the fabric: LUT inputs are folded into
@@ -462,6 +594,12 @@ struct Cyclone2Impl : HimbaechelAPI
                     // takes the source on its sync load path instead.
                     c->disconnectPort(u.port);
                     c->connectPort(u.port, in);
+                } else if (c->type == id_CY2_M4K && !inv) {
+                    // A buffer in front of an M4K input: the block takes the
+                    // source straight from its LAB line. (An inverter stays:
+                    // the block inverts no data or address pin.)
+                    c->disconnectPort(u.port);
+                    c->connectPort(u.port, in);
                 } else if (c->type == id_LCELL_FF && u.port.in(id_ENA, id_SCLR)) {
                     IdString flag = u.port == id_ENA ? id_ENA_INV : id_SCLR_INV;
                     c->disconnectPort(u.port);
@@ -634,11 +772,15 @@ struct Cyclone2Impl : HimbaechelAPI
             if (ctx->getBelType(bel) == id_CLKCTRL)
                 inclk[ctx->getBelPinWire(bel, id_INCLK)] = bel;
 
+        auto is_clock = [](const PortRef &usr) {
+            return (usr.cell->type == id_LCELL_FF && usr.port == id_CLK) ||
+                   (usr.cell->type == id_CY2_M4K && usr.port == id_CLK0);
+        };
         std::vector<NetInfo *> clocks;
         for (auto &net : ctx->nets) {
             NetInfo *ni = net.second.get();
             for (auto &usr : ni->users)
-                if (usr.cell->type == id_LCELL_FF && usr.port == id_CLK) {
+                if (is_clock(usr)) {
                     clocks.push_back(ni);
                     break;
                 }
@@ -678,9 +820,9 @@ struct Cyclone2Impl : HimbaechelAPI
             for (auto &u : ni->users)
                 users.push_back(u);
             for (auto &usr : users)
-                if (usr.cell->type == id_LCELL_FF && usr.port == id_CLK) {
-                    usr.cell->disconnectPort(id_CLK);
-                    usr.cell->connectPort(id_CLK, g);
+                if (is_clock(usr)) {
+                    usr.cell->disconnectPort(usr.port);
+                    usr.cell->connectPort(usr.port, g);
                 }
             cc->connectPort(id_INCLK, ni);
             cc->connectPort(id_OUTCLK, g);
@@ -841,6 +983,8 @@ struct Cyclone2Impl : HimbaechelAPI
     {
         if (cell_type.in(id_CY2_IBUF, id_CY2_OBUF, id_CY2_IOBUF))
             return id_IOE;
+        if (cell_type == id_CY2_M4K)
+            return id_M4K;
         return cell_type;
     }
 
@@ -849,6 +993,8 @@ struct Cyclone2Impl : HimbaechelAPI
         IdString bel_type = ctx->getBelType(bel);
         if (bel_type == id_IOE)
             return cell_type.in(id_CY2_IBUF, id_CY2_OBUF, id_CY2_IOBUF);
+        if (bel_type == id_M4K)
+            return cell_type == id_CY2_M4K;
         return bel_type == cell_type;
     }
 
