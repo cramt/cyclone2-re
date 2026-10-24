@@ -150,6 +150,10 @@ pub enum Mode {
     /// Both ports read and write, port B's input registers on `b_clock`.
     /// Widths up to x18 (`Mode::true_dual` checks).
     TrueDual { a: ReadPort, b: ReadPort, b_clock: Sel },
+    /// Two x18 single ports on one clock, port A on words 128-255 and port
+    /// B on 0-127 of a 256 x 18 block: how Quartus builds a 128 x 32/36
+    /// single port.
+    Packed { a_out: Option<OutReg>, b_out: Option<OutReg> },
 }
 
 impl Mode {
@@ -380,6 +384,21 @@ impl M4k {
                 put(one(arch::RAM_SELECT_CLK_BYTE_ENABLE_DATA_B)?, b_clock == Sel::One)?;
                 (a.out_reg, b.out_reg)
             }
+            Mode::Packed { a_out, b_out } => {
+                // A true dual port, both x18 on clock 0, plus the packed
+                // flag (s32, s36).
+                for t in [arch::RAM_USE_TRUE_DUAL_PORT_MODE, arch::RAM_USE_PACKED_MODE, arch::RAM_FLOW_THROUGH_MODE, arch::RAM_FLOW_THROUGH_MODE_B] {
+                    put(one(t)?, true)?;
+                }
+                for t in [arch::RAM_DATA_WRITE_MODE, arch::RAM_DATA_WRITE_MODE_B] {
+                    for (bit, v) in write_mode(t, Width::X18)? {
+                        put(bit, v)?;
+                    }
+                }
+                put(one(arch::RAM_SELECT_CLK_READ_ENABLE_READ_ADDRESS_B)?, false)?;
+                put(one(arch::RAM_SELECT_CLK_BYTE_ENABLE_DATA_B)?, false)?;
+                (a_out, b_out)
+            }
         };
         let regs = [
             (a_out, arch::RAM_REG_DATA_OUT, arch::RAM_SELECT_CLK_DATA_OUT, arch::RAM_USE_CLR_DATA_OUT, arch::RAM_SELECT_CLR_DATA_OUT),
@@ -511,12 +530,13 @@ fn mem_init(a: &Atom) -> Result<Vec<bool>> {
 /// mux, the atom itself: `<atom>` (bit 0 of its first output port, port
 /// `*` here) and `<atom>~PORTBDATAOUT3`. Owners are hierarchy paths with
 /// the `entity:` parts dropped, which is how the post-fit netlist names the
-/// atoms.
-pub type Sublocs = HashMap<(String, char, u32), u32>;
+/// atoms. Values are (half, slot): half is 0 except in a packed block,
+/// where the atom on half 1 is port B.
+pub type Sublocs = HashMap<(String, char, u32), (u32, u32)>;
 
 /// `altsyncram:ram|altsyncram_t581:auto_generated|q_a[0]` ->
 /// `ram|auto_generated|q_a[0]`.
-fn instance_path(cell: &str) -> String {
+pub fn instance_path(cell: &str) -> String {
     cell.split('|').map(|seg| seg.rsplit_once(':').map_or(seg, |(_, inst)| inst)).collect::<Vec<_>>().join("|")
 }
 
@@ -553,8 +573,7 @@ pub fn sublocations(rcf: &str) -> Result<Sublocs> {
         let parts: Vec<&str> = inner.rsplitn(3, ',').map(str::trim).collect();
         ensure!(parts.len() == 3, "ram_sublocations line {l:?}");
         let (slot, field, cell) = (parts[0].parse::<u32>()?, parts[1].parse::<u32>()?, parts[2]);
-        ensure!(field == 0, "ram_sublocations {l:?}: packed block halves not modelled");
-        out.insert(cell_key(cell), slot);
+        out.insert(cell_key(cell), (field, slot));
     }
     Ok(out)
 }
@@ -579,21 +598,30 @@ pub fn from_quartus(atoms: &[Atom], sigs: &[Signal], rcf_text: &str) -> Result<(
     let subs = sublocations(rcf_text)?;
     let mut out = Vec::new();
     for (&(x, y), v) in &by_loc {
-        let [a] = v[..] else {
-            unmodelled.push(format!("M4K X{x} Y{y}: {} RAM atoms in one block (packed mode)", v.len()));
-            continue;
+        let m = match v[..] {
+            [a] => block(a, x, y, sigs, &subs, None).with_context(|| a.name.clone()),
+            [p, q] => packed(p, q, x, y, sigs, &subs),
+            _ => Err(anyhow::anyhow!("{} RAM atoms in one block", v.len())),
         };
-        match block(a, x, y, sigs, &subs) {
+        match m {
             Ok(m) => out.push(m),
-            Err(e) => unmodelled.push(format!("M4K X{x} Y{y} ({}): {e:#}", a.name)),
+            Err(e) => unmodelled.push(format!("M4K X{x} Y{y}: {e:#}")),
         }
     }
     Ok((out, unmodelled))
 }
 
-fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs) -> Result<M4k> {
+/// One atom's share of a block. `half` is set for one of the two
+/// single-port atoms of a packed block (`packed`): the block is then 256 x 18
+/// whatever the atom says, half 0 is port A on words 128-255, half 1 port B
+/// on words 0-127 (fuzz s32, s36).
+fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs, half: Option<u32>) -> Result<M4k> {
     let op = param(a, "operation_mode")?;
-    let pa = read_port(a, 'a')?;
+    let mut pa = read_port(a, 'a')?;
+    if half.is_some() {
+        ensure!(op == "single_port", "packed {op} atom not modelled");
+        pa.width = Width::X18;
+    }
     let (mode, cell_port) = match op {
         // A single port reads x36 only through port B (fuzz: r36 sets port
         // B's write mode and read clock, its address enters on the read
@@ -619,6 +647,27 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs) -> Result<M4
     let prefix = match a.name.rfind('|') {
         Some(i) => a.name[..=i].to_string(),
         None => String::new(),
+    };
+    // A packed half's bits aren't contiguous (s36: one atom holds bits 0-8
+    // and 27-35): its slices are the sublocations on its half, atom bit k
+    // the k-th of them.
+    let half_cells: Option<Vec<u32>> = half.map(|h| {
+        let mut v: Vec<u32> = subs.iter().filter(|((o, p, _), (hh, _))| *o == prefix && *p == 'a' && *hh == h).map(|((_, _, b), _)| *b).collect();
+        v.sort();
+        v
+    });
+    // Slice name (bit number of the logical RAM) of atom bit `bit`, and back.
+    let slice_of = |p: char, bit: u32| -> u32 {
+        match &half_cells {
+            Some(c) => c.get(bit as usize).copied().unwrap_or(u32::MAX),
+            None => bit + first(p),
+        }
+    };
+    let atom_bit = |p: char, slice: u32| -> Option<u32> {
+        match &half_cells {
+            Some(c) => c.iter().position(|&b| b == slice).map(|i| i as u32),
+            None => slice.checked_sub(first(p)),
+        }
     };
     let widths = |p: char| -> Result<Width> {
         Ok(match (mode, p) {
@@ -649,11 +698,13 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs) -> Result<M4
     // narrow slice are `PORTADATAIN[idx]`).
     let column = |port: char, bit: u32, idx: u32| -> Result<usize> {
         let key = |owner: &str, p: char, b: u32| subs.get(&(owner.to_string(), p, b));
-        let s = *key(&prefix, port, bit + first(port))
+        let (_, s) = *key(&prefix, port, slice_of(port, bit))
             .or_else(|| key(&a.name, port, bit))
             .or_else(|| if bit == 0 { key(&a.name, '*', 0) } else { None })
-            .or_else(|| key(&prefix, cell_port, bit + first(cell_port)))
-            .with_context(|| format!("no ram_sublocation for port {port} bit {bit}"))? as usize;
+            .or_else(|| key(&prefix, cell_port, slice_of(cell_port, bit)))
+            .with_context(|| format!("no ram_sublocation for port {port} bit {bit}"))?;
+        // A packed half's slots count both halves' 36 columns.
+        let s = if half.is_some() { s as usize % 18 } else { s as usize };
         Ok(narrow.linear(bit as usize / narrow_bits + idx as usize, s))
     };
 
@@ -662,9 +713,10 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs) -> Result<M4
     // design.
     let mut content = Content::default();
     let w = num(a, &format!("port_{cell_port}_data_width"))? as usize;
+    let word0 = if half == Some(0) { 128 } else { 0 };
     for (n, &b) in mem_init(a)?.iter().enumerate() {
         if b {
-            content.set_linear(cell_width.linear(n / w, column(cell_port, (n % w) as u32, 0)?));
+            content.set_linear(cell_width.linear(word0 + n / w, column(cell_port, (n % w) as u32, 0)?));
         }
     }
 
@@ -686,7 +738,16 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs) -> Result<M4
             // cell, bit `idx` of the port.
             let (owner, cport, cbit) = cell_key(&d.cell);
             let port_idx = idx;
-            let (cbit, idx) = if owner == a.name { (idx, 0) } else { (cbit.checked_sub(first(cport)).context("slice bit below the atom's first bit")?, idx) };
+            let (cbit, idx) = if owner == a.name {
+                (idx, 0)
+            } else {
+                match atom_bit(cport, cbit) {
+                    Some(b) => (b, idx),
+                    // The other atom of a packed block.
+                    None if half.is_some() => continue,
+                    None => bail!("slice {cbit} below the atom's first bit"),
+                }
+            };
             let line = || -> Result<u8> {
                 ensure!(r.kind == "LOCAL_INTERCONNECT", "{} {}: fed by {}", d.cell, d.port, r.kind);
                 Ok(r.index as u8)
@@ -707,8 +768,8 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs) -> Result<M4
             match port {
                 "PORTAADDR" | "PORTBADDR" => {
                     let b = port == "PORTBADDR" || matches!(mode, Mode::SimpleDual { write: None, .. });
-                    let w = widths(if b { 'b' } else { 'a' })?;
-                    let inp = Input::addr(b, port_idx + 12 - w.addr_bits())?;
+                    let w = widths(if b && half.is_none() { 'b' } else { 'a' })?;
+                    let inp = Input::addr(b || half == Some(1), port_idx + 12 - w.addr_bits())?;
                     put_input(&mut m.inputs, inp, line()?)?;
                 }
                 "PORTADATAIN" | "PORTBDATAIN" => {
@@ -718,7 +779,7 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs) -> Result<M4
                     let w = widths(if b { 'b' } else { 'a' })?;
                     ensure!(cport == cell_port || owner == a.name, "data sink on cell of port {cport}");
                     let col = w.column(column(if b { 'b' } else { 'a' }, cbit, idx)?);
-                    let inp = Input::Data((col + if b { 18 } else { 0 }) as u8);
+                    let inp = Input::Data((col + if b || half == Some(1) { 18 } else { 0 }) as u8);
                     put_input(&mut m.inputs, inp, line()?)?;
                 }
                 "PORTABYTEENAMASKS" => {
@@ -735,6 +796,7 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs) -> Result<M4
                     }
                     let c = &mut m.controls;
                     let (slot, what) = match port {
+                        "PORTAWE" if half == Some(1) => (&mut c.b_write_enable, "port B write enable"),
                         "PORTAWE" => (&mut c.write_enable, "write enable"),
                         "PORTBREWE" => (&mut c.b_write_enable, "port B write enable"),
                         "CLK0" => (&mut c.clock[0], "clock"),
@@ -758,6 +820,53 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs) -> Result<M4
     }
     for p in ["portaaddrstall", "portbaddrstall"] {
         ensure!(a.net(p).is_none(), "{p} not modelled");
+    }
+    Ok(m)
+}
+
+/// Two single-port atoms sharing one block (packed mode). Which is port A
+/// is the rcf's sublocation half of their output bits.
+fn packed(p: &Atom, q: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs) -> Result<M4k> {
+    let half_of = |a: &Atom| -> Result<u32> {
+        let prefix = a.name.rfind('|').map_or("", |i| &a.name[..=i]);
+        let first: u32 = a.params.get("port_a_first_bit_number").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let (h, _) = subs.get(&(prefix.to_string(), 'a', first)).with_context(|| format!("{}: no sublocation", a.name))?;
+        Ok(*h)
+    };
+    let (a0, a1) = match (half_of(p)?, half_of(q)?) {
+        (0, 1) => (p, q),
+        (1, 0) => (q, p),
+        h => bail!("packed atoms on halves {h:?}"),
+    };
+    let m0 = block(a0, x, y, sigs, subs, Some(0)).with_context(|| a0.name.clone())?;
+    let m1 = block(a1, x, y, sigs, subs, Some(1)).with_context(|| a1.name.clone())?;
+    let out = |m: &M4k| match m.mode {
+        Mode::Single { a } => Ok(a.out_reg),
+        _ => bail!("packed half is not single port"),
+    };
+    let mut m = M4k { mode: Mode::Packed { a_out: out(&m0)?, b_out: out(&m1)? }, ..m0.clone() };
+    for (&inp, &line) in &m1.inputs {
+        put_input(&mut m.inputs, inp, line)?;
+    }
+    let (c, d) = (&mut m.controls, &m1.controls);
+    for k in 0..8 {
+        if let Some(l) = d.pia[k] {
+            put(&mut c.pia[k], l, "control input")?;
+        }
+    }
+    for k in 0..2 {
+        for (slot, v) in [(&mut c.clock[k], d.clock[k]), (&mut c.enable[k], d.enable[k]), (&mut c.clear[k], d.clear[k])] {
+            if let Some(v) = v {
+                put(slot, v, "shared control")?;
+            }
+        }
+        c.enable_inverted[k] |= d.enable_inverted[k];
+    }
+    if let Some(v) = d.b_write_enable {
+        put(&mut c.b_write_enable, v, "port B write enable")?;
+    }
+    for (w, &v) in m.content.0.iter_mut().zip(m1.content.0.iter()) {
+        *w |= v;
     }
     Ok(m)
 }

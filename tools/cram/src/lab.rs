@@ -70,6 +70,9 @@ pub struct LabDb {
     /// addresses (these groups have no block base).
     pub clkctrl_select: Vec<Vec<i32>>,
     pub clkctrl_enable: Vec<i32>,
+    /// By G: the two-level mux from the clock control's LAB lines onto its
+    /// core input (`CLKBUF_INTERFACE_COREIN` G; absolute addresses).
+    pub clkctrl_corein: Vec<Feature>,
     /// (x, y) -> base flat address of the LAB block.
     bases: HashMap<(u32, u32), u32>,
 }
@@ -108,7 +111,12 @@ impl LabDb {
             _ => bail!("CLKBUF_ENABLE_MODE is not a plain bit list"),
         };
         ensure!(clkctrl_select.len() == 16 && clkctrl_enable.len() == 16, "expected 16 global clock controls");
-        Ok(LabDb { features, bases, clkctrl_select, clkctrl_enable })
+        let mut clkctrl_corein: Vec<Feature> = Vec::new();
+        for g in 0..16 {
+            let grp = db.arch_groups.iter().find(|a| a.arch_type == arch::CLKBUF_INTERFACE_COREIN && a.group_index == g);
+            clkctrl_corein.push(Feature::from(db, grp.with_context(|| format!("asmdb has no CLKBUF_INTERFACE_COREIN {g}"))?));
+        }
+        Ok(LabDb { features, bases, clkctrl_select, clkctrl_enable, clkctrl_corein })
     }
 
     pub fn labs(&self) -> usize {
