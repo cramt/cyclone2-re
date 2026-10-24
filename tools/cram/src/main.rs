@@ -2,8 +2,8 @@ use anyhow::{bail, Result};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use cram::{addr, le, phys::{Bits, Db, PhysDesign}, quartus, rbf::{self, FrameBit, Rbf, RepBit}};
-use ddb::device::Device;
+use chipsmith_cyclone2::bitstream::{self as bitstream, addr, blank, io, jtag, lab, le, nextpnr, phys::{Bits, Db, PhysDesign}, rbf::{self, FrameBit, Rbf, RepBit}};
+use cram::quartus;
 
 fn usage() -> ! {
     eprintln!(
@@ -68,7 +68,7 @@ fn categorise(b: FrameBit, used: &HashSet<(u32, u32)>) -> &'static str {
 
 /// RE commands read Quartus' device files directly.
 fn load_db() -> Result<Db> {
-    Db::from_quartus(&devinfo())
+    cram::db::from_quartus(&devinfo())
 }
 
 /// Use-time commands read only the database this repo ships.
@@ -155,7 +155,7 @@ fn is_io_region(b: FrameBit) -> bool {
 /// The base image: an RBF file, or `-` for the one `blank` builds.
 fn base(m: &Db, arg: &Path) -> Result<Rbf> {
     if arg == Path::new("-") {
-        cram::blank::image(&m.asmdb, &m.io)
+        blank::image(&m.asmdb, &m.io)
     } else {
         Rbf::read(arg)
     }
@@ -163,20 +163,7 @@ fn base(m: &Db, arg: &Path) -> Result<Rbf> {
 
 /// Base image + the physical design's bits, check words recomputed.
 fn pack(m: &Db, empty: &Path, des: &PhysDesign) -> Result<(Rbf, Bits)> {
-    let mut rbf = base(m, empty)?;
-    let bits = des.bits(m)?;
-    anyhow::ensure!(bits.conflicts().is_empty(), "model sets {} bits both ways", bits.conflicts().len());
-    for &(b, v, _) in &bits.core {
-        rbf.set(b, v);
-    }
-    for &(b, v) in &bits.rep {
-        rbf.rep_set(b, v);
-    }
-    for &(byte, bit) in &bits.options {
-        rbf.set_option(byte, bit);
-    }
-    rbf.fix_crcs();
-    Ok((rbf, bits))
+    bitstream::assemble(m, base(m, empty)?, des)
 }
 
 fn report(out: &Path, des: &PhysDesign, bits: &Bits) {
@@ -257,7 +244,7 @@ fn compare(ours: &Rbf, theirs: &Rbf) {
     }
 }
 
-fn asmdb() -> Result<ddb::asmdb::Asmdb> {
+fn asmdb() -> Result<chipsmith_cyclone2::bitstream::asmdb::Asmdb> {
     let p = devinfo().join("ddb_magellan4_asmdb.ddb");
     ddb::asmdb::parse(&ddb::container::Ddb::open(&p)?.body)
 }
@@ -267,8 +254,8 @@ fn asmdb() -> Result<ddb::asmdb::Asmdb> {
 /// LE input-mux table learned from the routing fuzz designs, which it
 /// replaced; README.)
 fn lab_check() -> Result<()> {
-    use ddb::asmdb::arch;
-    let lab = cram::lab::LabDb::new(&asmdb()?)?;
+    use chipsmith_cyclone2::bitstream::asmdb::arch;
+    let lab = lab::LabDb::new(&asmdb()?)?;
     let lut = lab.feature(arch::LE_LUT_FUNCTION, -1)?;
     let mut n = 0;
     for x in 1..=64 {
@@ -311,7 +298,7 @@ fn main() -> Result<()> {
         ("routing", [dir]) => {
             // Exploration aid: every routing bit an rcf sets, plus what didn't
             // resolve, for scripts that model the rest.
-            let dev = Device::load(&devinfo(), "magellan4")?;
+            let dev = ddb::device::load(&devinfo(), "magellan4")?;
             let sigs = cram::rcf::read(&Path::new(dir).join("build/top.rcf"))?;
             let (bits, skipped) = cram::route::bits(&dev, &sigs);
             for b in bits {
@@ -328,7 +315,7 @@ fn main() -> Result<()> {
         ("lab-check", []) => lab_check()?,
         ("pack", [empty, routed, out]) => {
             let m = shipped_db()?;
-            let r = cram::nextpnr::read(&m.dev, Path::new(routed))?;
+            let r = nextpnr::read(&m.dev, Path::new(routed))?;
             let des = r.to_phys(&m.dev, &m.io)?;
             let (rbf, bits) = pack(&m, Path::new(empty), &des)?;
             std::fs::write(out, rbf.bytes())?;
@@ -336,8 +323,8 @@ fn main() -> Result<()> {
         }
         ("quartus-export", [routed, dir]) => {
             let m = shipped_db()?;
-            let r = cram::nextpnr::read(&m.dev, Path::new(routed))?;
-            let q = r.to_quartus(&m.dev, &m.io)?;
+            let r = nextpnr::read(&m.dev, Path::new(routed))?;
+            let q = quartus::export::to_quartus(&r, &m.dev, &m.io)?;
             let dir = Path::new(dir);
             std::fs::create_dir_all(dir)?;
             std::fs::write(dir.join("top.vqm"), q.vqm)?;
@@ -350,7 +337,7 @@ fn main() -> Result<()> {
             let m = load_db()?;
             let des = match kind.as_str() {
                 "quartus" => quartus::load(&m.dev, Path::new(src))?.design,
-                "nextpnr" => cram::nextpnr::read(&m.dev, Path::new(src))?.to_phys(&m.dev, &m.io)?,
+                "nextpnr" => nextpnr::read(&m.dev, Path::new(src))?.to_phys(&m.dev, &m.io)?,
                 _ => usage(),
             };
             let mut lines = Vec::new();
@@ -386,20 +373,20 @@ fn main() -> Result<()> {
             let m = load_db()?;
             let (a, b) = (Rbf::read(Path::new(a))?, Rbf::read(Path::new(b))?);
             for fb in a.diff(&b) {
-                if let Some(d) = m.io.describe(cram::io::IoBit::Core(fb)) {
+                if let Some(d) = m.io.describe(io::IoBit::Core(fb)) {
                     println!("{fb} {}->{} {d:?}", u8::from(a.get(fb)), u8::from(b.get(fb)));
                 }
             }
             for rb in a.rep_diff(&b) {
-                if let Some(d) = m.io.describe(cram::io::IoBit::Rep(rb)) {
+                if let Some(d) = m.io.describe(io::IoBit::Rep(rb)) {
                     println!("{rb} {}->{} {d:?}", u8::from(a.rep_get(rb)), u8::from(b.rep_get(rb)));
                 }
             }
         }
-        ("svf", [rbf, out]) => std::fs::write(out, cram::jtag::svf(&Rbf::read(Path::new(rbf))?))?,
+        ("svf", [rbf, out]) => std::fs::write(out, jtag::svf(&Rbf::read(Path::new(rbf))?))?,
         ("blank", [out]) => {
             let m = shipped_db()?;
-            std::fs::write(out, cram::blank::image(&m.asmdb, &m.io)?.bytes())?;
+            std::fs::write(out, blank::image(&m.asmdb, &m.io)?.bytes())?;
         }
         ("db", [out]) => cram::db::build(&devinfo(), Path::new(out))?,
         ("chipdb", [out]) => {

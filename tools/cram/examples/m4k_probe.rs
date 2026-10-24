@@ -7,7 +7,7 @@ use ddb::asmdb::arch;
 use std::collections::BTreeMap;
 
 fn main() -> anyhow::Result<()> {
-    let db = cram::phys::Db::load(&cram::db::locate()?)?;
+    let db = chipsmith_cyclone2::bitstream::phys::Db::load(&cram::db::locate()?)?;
     let dev = &db.dev;
     let r = &dev.routing;
     // Elements by (enum, z, index) at each M4K tile.
@@ -31,7 +31,7 @@ fn main() -> anyhow::Result<()> {
         }
         println!("{} tiles e.g. {:?}", locs.len(), &locs[..locs.len().min(4)]);
         for (e, v) in by {
-            println!("  {} ({e}): {} elements, z/index {:?}..{:?}", cram::chipdb::element_name(e), v.len(), v.first(), v.last());
+            println!("  {} ({e}): {} elements, z/index {:?}..{:?}", chipsmith_cyclone2::bitstream::device::element_name(e), v.len(), v.first(), v.last());
         }
     }
     let show = |name: &str, t: i32, idx: &[i32]| -> anyhow::Result<()> {

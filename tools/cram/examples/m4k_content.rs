@@ -8,16 +8,16 @@ use ddb::asmdb::arch;
 fn main() -> anyhow::Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let [rbf, x, y] = &a[..] else { anyhow::bail!("usage: m4k_content <rbf> <x> <y>") };
-    let db = cram::phys::Db::load(&cram::db::locate()?)?;
-    let rbf = cram::rbf::Rbf::read(std::path::Path::new(rbf))?;
+    let db = chipsmith_cyclone2::bitstream::phys::Db::load(&cram::db::locate()?)?;
+    let rbf = chipsmith_cyclone2::bitstream::rbf::Rbf::read(std::path::Path::new(rbf))?;
     let f = db.m4k.feature(arch::RAM_CONTENT_YGR_MEAB, -1)?;
     let (x, y): (u32, u32) = (x.parse()?, y.parse()?);
     let base = db.m4k.base(x, y)?;
-    let mut rows = vec![0u64; cram::m4k::ROWS];
+    let mut rows = vec![0u64; chipsmith_cyclone2::bitstream::m4k::ROWS];
     for (i, &off) in f.paths[0][0].iter().enumerate() {
         let flat = (base as i64 + off as i64) as u32;
-        if rbf.get(cram::addr::frame_bit(flat)) {
-            rows[i % cram::m4k::ROWS] |= 1 << (i / cram::m4k::ROWS);
+        if rbf.get(chipsmith_cyclone2::bitstream::addr::frame_bit(flat)) {
+            rows[i % chipsmith_cyclone2::bitstream::m4k::ROWS] |= 1 << (i / chipsmith_cyclone2::bitstream::m4k::ROWS);
         }
     }
     // Which LAB line each input mux and control input selects.
@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
         let f = db.m4k.feature(at, grp)?;
         for s in 0..cram::chipdb::M4K_LINES {
             let Ok(bits) = f.source_bits(0, s) else { continue };
-            if bits.iter().all(|&b| rbf.get(cram::addr::frame_bit((base as i64 + b as i64) as u32))) {
+            if bits.iter().all(|&b| rbf.get(chipsmith_cyclone2::bitstream::addr::frame_bit((base as i64 + b as i64) as u32))) {
                 println!("{pin} <- line {s}");
             }
         }

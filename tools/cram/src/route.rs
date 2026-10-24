@@ -1,9 +1,8 @@
 //! Routed nets (from an `.rcf`) -> routing-graph edges -> flat CRAM bits.
 
-use ddb::asm::AsmBit;
-use ddb::device::{Device, Node};
+use chipsmith_cyclone2::bitstream::device::{AsmBit, Device, Node};
+use chipsmith_cyclone2::bitstream::phys::{Pip, RoutedNet};
 
-use crate::phys::{Pip, RoutedNet};
 use crate::rcf::{Resource, Signal};
 
 /// rcf resource kind -> `DEV_ELEMENT_ENUM` of the routing element. Found by

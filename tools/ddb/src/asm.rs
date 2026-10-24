@@ -11,40 +11,7 @@
 use anyhow::{ensure, Result};
 
 use crate::pdb::Cursor;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AsmBit {
-    /// Flat CRAM address (`DYGR_MAX_CRAM_FLAT_ADDRESS` caps it at 2^31-1).
-    pub flat_address: u32,
-    pub use_encoded_setting: u8,
-    pub is_encoded_bit_high: u8,
-    pub is_strangely_encoded: u8,
-    pub is_cff_bit: u8,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AsmNode {
-    /// 1-based index into `bits` where each group starts; a group ends where
-    /// the next begins (`DYGR_ROUTE_ASM_NODE::get_num_bits_in_group` @ 0xebdd0).
-    pub start_bit_index: Vec<u16>,
-    pub bits: Vec<AsmBit>,
-}
-
-impl AsmNode {
-    /// Bits of group `g`. A start index of 0 marks a group with no bits
-    /// (`get_single_bit` asserts it is nonzero before indexing).
-    pub fn group(&self, g: usize) -> &[AsmBit] {
-        let start = self.start_bit_index[g] as usize;
-        if start == 0 {
-            return &[];
-        }
-        let end = self.start_bit_index[g + 1..]
-            .iter()
-            .find(|&&s| s != 0)
-            .map_or(self.bits.len(), |&s| s as usize - 1);
-        &self.bits[start - 1..end]
-    }
-}
+pub use chipsmith_cyclone2::bitstream::device::{AsmBit, AsmNode};
 
 pub fn parse(body: &[u8]) -> Result<Vec<AsmNode>> {
     let mut c = Cursor::new(body);

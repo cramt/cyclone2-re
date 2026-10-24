@@ -14,50 +14,7 @@
 use anyhow::{ensure, Context, Result};
 
 use crate::pdb::{Cursor, Ptr};
-
-/// Bit 31 of a global id marks a routing element; the low 31 bits index
-/// `m_route_element_list` (`DYGR_DIE_INFO_BODY::get_node_index_of_id` @ 0xdd280).
-pub const ROUTER_ID_BIT: u32 = 0x8000_0000;
-
-#[derive(Debug, Clone, Copy)]
-pub struct Element {
-    pub x: i16,
-    pub y: i16,
-    /// Global id that template fanout offsets are relative to.
-    pub fanout_edge_base: u32,
-    /// Index into `Routing::templates` (template object id - 1).
-    pub template: u32,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Template {
-    /// `DEV_ELEMENT_ENUM` value (wire/port kind); names live in DEV_ELEMENT_DESC.
-    pub element_enum: i16,
-    pub num_edges: i16,
-    pub z: i16,
-    pub index: i16,
-    /// Edges at or past this index are electrically redundant duplicates.
-    pub first_purely_redundant_edge: i16,
-    pub length: i8,
-    pub metal_layer: i8,
-    pub direction: i8,
-    pub fanout_offsets: Vec<i32>,
-    pub fanout_to_positions: Vec<i16>,
-}
-
-pub struct Routing {
-    pub elements: Vec<Element>,
-    pub templates: Vec<Template>,
-}
-
-impl Routing {
-    /// Global ids of node `i`'s fanouts (edges past `first_purely_redundant_edge` included).
-    pub fn fanout(&self, i: usize) -> impl Iterator<Item = u32> + '_ {
-        let e = &self.elements[i];
-        let t = &self.templates[e.template as usize];
-        t.fanout_offsets.iter().map(move |&o| e.fanout_edge_base.wrapping_add(o as u32))
-    }
-}
+pub use chipsmith_cyclone2::bitstream::device::{Element, Routing, Template, ROUTER_ID_BIT};
 
 /// Pointer ids are allocated in the order "new" pointers appear; back
 /// references carry `(id - last_id)` masked to 30 bits with bit 30 set so

@@ -1,10 +1,10 @@
 //! Which asmdb features hold the empty image's set bits? (exploration)
-use cram::rbf::{FrameBit, Rbf};
+use chipsmith_cyclone2::bitstream::rbf::{FrameBit, Rbf};
 use std::collections::{BTreeMap, HashMap, HashSet};
 fn main() -> anyhow::Result<()> {
     let devinfo = std::path::PathBuf::from(std::env::var("HOME")?).join("altera/13.0sp1/quartus/common/devinfo/cycloneii");
     let db = ddb::asmdb::parse(&ddb::container::Ddb::open(&devinfo.join("ddb_magellan4_asmdb.ddb"))?.body)?;
-    let io = cram::io::IoDb::new(&cram::io::pins_from_quartus(&devinfo)?, &db)?;
+    let io = chipsmith_cyclone2::bitstream::io::IoDb::new(&cram::db::pins_from_quartus(&devinfo)?, &db)?;
     let empty = Rbf::read(std::path::Path::new(&std::env::args().nth(1).unwrap()))?;
     // flat -> (block type, arch, group, path, level, bit index)
     let mut owner: HashMap<u32, Vec<(i32, i32, i32, usize, usize, usize)>> = HashMap::new();
@@ -37,11 +37,11 @@ fn main() -> anyhow::Result<()> {
     let iob: HashSet<_> = io.all_bits().collect();
     let mut by: BTreeMap<(i32, i32, i32, usize, usize, usize), usize> = BTreeMap::new();
     let mut nobody = 0; let mut nobody_frames: BTreeMap<u16, usize> = BTreeMap::new();
-    for f in cram::rbf::FIRST_CRC_FRAME..cram::rbf::FRAMES {
-        for bit in 0..cram::rbf::FRAME_BITS {
+    for f in chipsmith_cyclone2::bitstream::rbf::FIRST_CRC_FRAME..chipsmith_cyclone2::bitstream::rbf::FRAMES {
+        for bit in 0..chipsmith_cyclone2::bitstream::rbf::FRAME_BITS {
             let b = FrameBit { frame: f as u16, bit: bit as u16 };
-            if !empty.get(b) || iob.contains(&cram::io::IoBit::Core(b)) { continue }
-            let Some(flat) = cram::addr::flat(b) else { continue };
+            if !empty.get(b) || iob.contains(&chipsmith_cyclone2::bitstream::io::IoBit::Core(b)) { continue }
+            let Some(flat) = chipsmith_cyclone2::bitstream::addr::flat(b) else { continue };
             if defaults.contains(&flat) { continue }
             match owner.get(&flat) {
                 Some(v) => { for o in v { *by.entry(*o).or_default() += 1; } }

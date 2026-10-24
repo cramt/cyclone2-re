@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 fn main() -> anyhow::Result<()> {
     let devinfo = std::path::PathBuf::from(std::env::var("HOME")?).join("altera/13.0sp1/quartus/common/devinfo/cycloneii");
-    let dev = ddb::device::Device::load(&devinfo, "magellan4")?;
+    let dev = ddb::device::load(&devinfo, "magellan4")?;
     // kind -> enum -> (seen, edge from prev, edge to next)
     let mut tally: BTreeMap<String, BTreeMap<i16, (usize, usize, usize)>> = BTreeMap::new();
     for d in std::env::args().skip(1) {

@@ -225,7 +225,8 @@ design that bridges the JTAG cable to the configuration flash. It needs two
 hard blocks, one of each per device. Observed on three Quartus designs
 (a JTAG-to-EPCS bridge, the JTAG block with every output routed to a pin,
 the serial-flash block driven from switches), all byte-identical in
-`cram roundtrip` (`tools/cram/src/hard.rs`):
+`cram roundtrip` (chipsmith's `bitstream/hard.rs`, the Quartus side in
+`tools/cram/src/quartus/hard.rs`):
 
 - **Where.** Both sit in the non-LAB column X6: `cycloneii_jtag` at
   `JTAG_X1_Y19_N0` (routing elements at X6 Y21-22, z 0), `cycloneii_asmiblock`
@@ -440,7 +441,7 @@ order, `sum_lutc_input`, carry nets and register ports. The `.rcf` says
 which LAB line or LE feedback (`LOCAL_LINE`, index = LE) feeds each LE
 input, which LAB control line (`LAB_CONTROL_MUX` 0-3) carries each
 ENA/ACLR/SCLR/SLOAD, and which row-clock buffer (`BLK_CLK_BUF` 0-5)
-clocks the LAB. `tools/cram/src/logic.rs` turns that into settings.
+clocks the LAB. chipsmith's `bitstream/logic.rs` turns that into settings.
 
 Where the setting is a mux input, its bits come from the asmdb maps. For
 the input muxes, `aux` gives the source's first-level bit and
@@ -513,7 +514,7 @@ guessed.
 ### I/O pins (phase 5)
 
 Every pin's I/O element is configured from the device DB: no training
-designs and no copied bits. `tools/cram/src/io.rs`.
+designs and no copied bits. chipsmith's `bitstream/io.rs`.
 
 **Where the bits are (device DB, observed):**
 
@@ -621,7 +622,7 @@ standard per bank (`std`). How the post-fit netlist says it, observed:
 - An inverter after an I/O register becomes `*_power_up = "high"` with the
   inverted signal before it.
 
-In cram's model (`io.rs`) a used pin is `Dir::In(Input)`, `Dir::Out(Output)`
+In the model (chipsmith's `bitstream/io.rs`) a used pin is `Dir::In(Input)`, `Dir::Out(Output)`
 or `Dir::Bidir(Input, Output)`. An `Output` has data (`OutData::Line` with
 its optional output register, or a constant) and an `OutputEnable`
 (`Always`, `OpenDrain`, `Never`, or `Line` with inversion and its optional OE
@@ -657,7 +658,7 @@ only picks under timing pressure, and PCI clamp
 ### M4K RAM blocks (phase 5)
 
 Every M4K a Quartus design uses is configured from the device DB:
-`tools/cram/src/m4k.rs`. Tags as in [docs/ddb-format.md](docs/ddb-format.md):
+chipsmith's `bitstream/m4k.rs`. Tags as in [docs/ddb-format.md](docs/ddb-format.md):
 **[obs]** observed, **[inf]** inferred.
 
 **Where they are (asmdb, [obs]):**
@@ -793,7 +794,21 @@ just open-build examples/blinky   # examples/blinky/build/top.rbf
 No Quartus files are read at any step: everything comes from the device
 database committed under `db/` (below).
 
-**Device database** (`db/EP2C35F672C6/`, `tools/cram/src/db.rs`). What the
+**Where the code lives.** The assembler moved to
+[chipsmith](https://github.com/A-H-Technology/chipsmith)'s
+`chipsmith-cyclone2` crate, `crates/chipsmith-cyclone2/src/bitstream/`
+(its ADR-0003; "chipsmith's `bitstream/...`" below): the physical netlist
+and its bits, the nextpnr frontend, the base image, the RBF container, the
+JTAG stream, and the device database's format and reader. `cram` depends
+on that crate, so `cram pack`, `cram svf` and chipsmith's builds run one
+implementation, and `roundtrip`, `check` and `validate` here guard it.
+What stays here: the ddb decoders (which fill in chipsmith's device and
+asmdb types), `cram db`, the chip database export, the Quartus frontend
+(`tools/cram/src/quartus/`, `rcf.rs`, `vo.rs`, `route.rs`) and `cram
+quartus-export`.
+
+**Device database** (`db/EP2C35F672C6/`, `tools/cram/src/db.rs` and
+chipsmith's `bitstream/db.rs`). What the
 use-time commands (`cram pack`, `blank`, `chipdb`, `quartus-export`) need,
 derived once from Quartus' devinfo by `just db` (`cram db db`, about 6
 minutes) and committed, the way prjxray-db or Apicula ship theirs. Two
@@ -801,7 +816,7 @@ xz files:
 
 | file | size | contents |
 |---|---|---|
-| `device.bin.xz` | 3.2 MB (41.7 MB raw) | magic `C2RE-DB`, format version, then a [postcard](https://postcard.jamesmunns.com/wire-format) encoding of `db::Stored`: the routing graph (376,788 elements, 210,403 templates) and its 7,996,500 routing bits, stored by column as deltas; the asmdb block tables; the 475 bonded user pins of the F672 package with their IOE, bank and dual-purpose role |
+| `device.bin.xz` | 3.2 MB (41.7 MB raw) | magic `C2RE-DB`, format version, then a [postcard](https://postcard.jamesmunns.com/wire-format) encoding of chipsmith's `bitstream::db::Stored`: the routing graph (376,788 elements, 210,403 templates) and its 7,996,500 routing bits, stored by column as deltas; the asmdb block tables; the 475 bonded user pins of the F672 package with their IOE, bank and dual-purpose role |
 | `chipdb.txt.xz` | 9.3 MB (125.1 MB raw) | `cram chipdb` output, the input of `nextpnr/cyclone2/gen/arch_gen.py` |
 
 `cram db` writes `device.bin.xz`, reads it back (it must re-encode to the
@@ -809,9 +824,9 @@ same bytes), and exports `chipdb.txt.xz` from what it read back, so the
 nextpnr generator input can't drift from the packer's database. Output is
 deterministic (fixed-size xz blocks), so an unchanged device and unchanged
 code reproduce the committed files byte for byte. Rerun `just db` after
-changing anything `db.rs` stores or `chipdb.rs` exports, and bump
-`db::VERSION` when a stored type changes; a cram that reads another
-version refuses the file. cram finds the database through `CRAM_DB` (the
+changing anything chipsmith's `bitstream/db.rs` stores or `chipdb.rs`
+exports, and bump its `VERSION` when a stored type changes; a reader of
+another version refuses the file. cram finds the database through `CRAM_DB` (the
 `db/` directory) if set, otherwise in the checkout it was built in (walking
 up from the executable, then the source path cargo built it from). The
 reverse-engineering commands (`check`, `assemble`, `roundtrip`, `routing`,
@@ -824,7 +839,7 @@ A design dir holds `*.v` (top module `top`) and optionally `pins.qsf`
 `just validate <dir>` then has the oracle assemble the same placement and
 routing and compares (below).
 
-**Physical netlist** (`tools/cram/src/phys.rs`). What a placed and routed
+**Physical netlist** (chipsmith's `bitstream/phys.rs`). What a placed and routed
 design configures in device terms: LE configs (LUT mask over physical
 inputs, input sources, carry, register and its LAB clock slot), LAB-wide
 settings, clock controls, every used pin's IOE settings, M4K blocks (mode
@@ -832,11 +847,11 @@ and port widths, output registers, control sources, which LAB line feeds
 each input pin, the 4,608 content bits), and routed nets as
 routing-graph edges. A `Pip` can only be built from two nodes the graph
 connects. `bits()` turns it into CRAM. Two frontends build it:
-`quartus.rs` (post-fit netlist + rcf + qsf, what `cram assemble` and
-`roundtrip` use; still 178/179 byte-identical) and `nextpnr.rs` (routed
-himbaechel JSON, `cram pack`).
+`tools/cram/src/quartus/` (post-fit netlist + rcf + qsf, what `cram
+assemble` and `roundtrip` use; still 178/179 byte-identical) and
+chipsmith's `bitstream/nextpnr.rs` (routed himbaechel JSON, `cram pack`).
 
-**Base image without Quartus** (`cram blank`, `tools/cram/src/blank.rs`).
+**Base image without Quartus** (`cram blank`, chipsmith's `bitstream/blank.rs`).
 `cram assemble` used to start from Quartus' empty-design RBF. The base is
 now built from the container layout, the asmdb's 928 default bits, the IOE
 model with every pin unused, and the values unused blocks hold, named by

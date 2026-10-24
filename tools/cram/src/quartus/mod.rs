@@ -5,11 +5,16 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use ddb::device::Device;
+use chipsmith_cyclone2::bitstream::device::Device;
+use chipsmith_cyclone2::bitstream::phys::PhysDesign;
 
-use crate::logic::Logic;
-use crate::phys::PhysDesign;
-use crate::{io, m4k, rcf, route, vo};
+use crate::{rcf, route, vo};
+
+pub mod export;
+pub mod hard;
+pub mod io;
+pub mod logic;
+pub mod m4k;
 
 pub struct Loaded {
     pub design: PhysDesign,
@@ -24,13 +29,13 @@ pub fn load(dev: &Device, dir: &Path) -> Result<Loaded> {
     let sigs = rcf::read(&dir.join("build/top.rcf"))?;
     let (nets, skipped) = route::nets(dev, &sigs);
     let atoms = vo::read(&dir.join("build/simulation/modelsim/top.vo")).context("post-fit netlist (just netlist <dir>)")?;
-    let (logic, unmodelled) = Logic::from_quartus(&atoms, &sigs)?;
+    let (logic, unmodelled) = logic::from_atoms(&atoms, &sigs)?;
     let qsf = std::fs::read_to_string(dir.join("build/top.qsf")).context("back-annotated qsf")?;
     let pins = io::pin_uses(&atoms, &sigs, &qsf)?;
-    let unused_pins = io::UnusedPins::from_qsf(&qsf)?;
+    let unused_pins = io::unused_pins(&qsf)?;
     let rcf_text = std::fs::read_to_string(dir.join("build/top.rcf"))?;
-    let (m4ks, ram_unmodelled) = m4k::from_quartus(&atoms, &sigs, &rcf_text)?;
-    let hard = crate::hard::from_quartus(&atoms, &sigs)?;
+    let (m4ks, ram_unmodelled) = m4k::from_atoms(&atoms, &sigs, &rcf_text)?;
+    let hard = hard::from_atoms(&atoms, &sigs)?;
     let mut unmodelled = unmodelled;
     unmodelled.extend(ram_unmodelled);
     Ok(Loaded { design: PhysDesign { logic, pins, unused_pins, m4ks, hard, nets }, unmodelled, skipped_resources: skipped.len() })

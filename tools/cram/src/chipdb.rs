@@ -23,11 +23,25 @@ use anyhow::{ensure, Context, Result};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
 
-use ddb::asmdb::arch;
-use ddb::routing::ROUTER_ID_BIT;
+use chipsmith_cyclone2::bitstream::asmdb::arch;
+use chipsmith_cyclone2::bitstream::device::{element_name, ROUTER_ID_BIT};
+use chipsmith_cyclone2::bitstream::io::{BLOCK_CLK_N, BLOCK_CLK_P, BLOCK_COL};
+use chipsmith_cyclone2::bitstream::m4k::{self, CONTROL_PINS as M4K_CONTROL_PINS};
+use chipsmith_cyclone2::bitstream::phys::Db;
 
-use crate::io::{BLOCK_CLK_N, BLOCK_CLK_P, BLOCK_COL};
-use crate::phys::Db;
+/// The JTAG block's outputs into the core: (rcf resource kind, atom port,
+/// routing element enum), matched on designs that route each one.
+pub const JTAG_OUTPUTS: [(&str, &str, i16); 8] = [
+    ("JTAG_TMSUTAP_PIN", "tmsutap", 361),
+    ("JTAG_TCKUTAP_PIN", "tckutap", 362),
+    ("JTAG_TDIUTAP_PIN", "tdiutap", 363),
+    ("JTAG_SHIFTUSER_PIN", "shiftuser", 364),
+    ("JTAG_CLKDRUSER_PIN", "clkdruser", 365),
+    ("JTAG_UPDATEUSER_PIN", "updateuser", 366),
+    ("JTAG_RUNIDLEUSER_PIN", "runidleuser", 367),
+    ("JTAG_USR1USER_PIN", "usr1user", 368),
+];
+pub const ASMI_DATA0OUT: i16 = 474;
 
 pub const WIDTH: u32 = 2 * 66;
 pub const HEIGHT: u32 = 37;
@@ -35,39 +49,6 @@ pub const HEIGHT: u32 = 37;
 pub const LAB_LINES: usize = 38;
 pub const LES: usize = 16;
 pub const LE_INPUTS: [&str; 4] = ["A", "B", "C", "D"];
-
-pub fn element_name(e: i16) -> String {
-    match e {
-        43 => "LOCAL_LINE",
-        45 => "LE_BUFFER",
-        264 => "R4",
-        268 => "R24",
-        269 => "C4",
-        275 => "C16",
-        276 => "LOCAL_INTERCONNECT",
-        289 => "CLK_BUFFER",
-        292 => "GLOBAL_CLK_H",
-        293 => "GLOBAL_CLK_V",
-        294 => "LAB_CLK",
-        298 => "TB_IO_CLK",
-        301 => "IO_DATAIN",
-        513 => "CLKBUF_IN",
-        515 => "CLKBUF_OUT",
-        560 => "BLK_CLK_BUF",
-        // The rcf's names for the JTAG and serial-flash blocks' outputs.
-        361 => "JTAG_TMSUTAP_PIN",
-        362 => "JTAG_TCKUTAP_PIN",
-        363 => "JTAG_TDIUTAP_PIN",
-        364 => "JTAG_SHIFTUSER_PIN",
-        365 => "JTAG_CLKDRUSER_PIN",
-        366 => "JTAG_UPDATEUSER_PIN",
-        367 => "JTAG_RUNIDLEUSER_PIN",
-        368 => "JTAG_USR1USER_PIN",
-        474 => "ASMI_DATAOUT",
-        _ => return format!("E{e}"),
-    }
-    .to_string()
-}
 
 #[derive(Default)]
 struct TileType {
@@ -220,7 +201,7 @@ pub const M4K_OUTPUTS: usize = 36;
 /// (arch type, group) that selects its LAB line. `DATA_INPUT` 18-35 and
 /// `BYTE_ENABLE_INPUT` 2-3 are the same muxes as `_B` 0-17 / 0-1 (m4k.rs).
 pub fn m4k_input_pins() -> Vec<(String, i32, i32)> {
-    crate::m4k::Input::all()
+    m4k::Input::all()
         .into_iter()
         .map(|i| {
             let (t, g) = i.group();
@@ -228,19 +209,6 @@ pub fn m4k_input_pins() -> Vec<(String, i32, i32)> {
         })
         .collect()
 }
-
-/// The M4K's control pins and the fast mux (arch type, group) feeding each:
-/// sources 0-7 are the 8 control inputs (`CTL<k>`), 8-13 the row clocks.
-pub const M4K_CONTROL_PINS: [(&str, i32, i32); 8] = [
-    ("CLK0", arch::RAM_CLOCK_FAST_MUX, 0),
-    ("CLK1", arch::RAM_CLOCK_FAST_MUX, 1),
-    ("ENA0", arch::RAM_CE_FAST_MUX, 0),
-    ("ENA1", arch::RAM_CE_FAST_MUX, 1),
-    ("CLR0", arch::RAM_CLEAR_FAST_MUX, 0),
-    ("CLR1", arch::RAM_CLEAR_FAST_MUX, 1),
-    ("WE", arch::RAM_WE_FAST_MUX, -1),
-    ("RE", arch::RAM_RE_FAST_MUX, -1),
-];
 
 /// The shared M4K tile type: one bel `M4K` (type `M4K`) whose input pins
 /// sit behind the block's source muxes over its LAB lines (`LI<l>`), whose
@@ -475,11 +443,11 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
             ("OUTCLK".into(), out, true),
         ]));
     }
-    // The JTAG and serial-flash blocks (hard.rs): one bel each, inputs
+    // The JTAG and serial-flash blocks (chipsmith `bitstream::hard`): one bel each, inputs
     // behind source muxes over the tile's local lines, outputs on their
     // routing elements.
     {
-        use crate::hard::{HardInput, ASMI_DATA0OUT, ASMI_XY, JTAG_OUTPUTS, JTAG_XY};
+        use chipsmith_cyclone2::bitstream::hard::{HardInput, ASMI_XY, JTAG_XY};
         let mut pins: BTreeMap<&str, Vec<(String, String, bool)>> = BTreeMap::new();
         for input in HardInput::ALL {
             let (bel, pin) = input.bel_pin();

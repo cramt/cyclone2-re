@@ -282,7 +282,8 @@ The groups correspond to fanout edges of the **source** element.
   out as 8 bit-in-byte lanes, predicts every routing bit of the 17
   routing fuzz designs with no misses and no polarity errors. **[obs]**
   The formula and the LAB/LE layout in those rows are in the README
-  ("CRAM addressing"); `tools/cram/src/addr.rs` implements it.
+  ("CRAM addressing"); chipsmith's
+  `crates/chipsmith-cyclone2/src/bitstream/addr.rs` implements it.
 
 `DEV_ASM_INFO` in libddb_dev.so is different. It holds the `asmdb` and
 `asmdb_dirt` files, implemented in libdb_asmdb.so. `asmdb` is decoded
@@ -341,7 +342,8 @@ reads it, and `ddb asmdb-canon` matches the trace. **[obs]**
 
 Block types 5 (row IOE, left and right edges), 6 (column IOE, top and
 bottom), 60 and 61 (dedicated clock input, p and n pad) hold the I/O
-element features: 43, 42, 2 and 1 groups. `tools/cram/src/io.rs` uses
+element features: 43, 42, 2 and 1 groups. chipsmith's
+`crates/chipsmith-cyclone2/src/bitstream/io.rs` uses
 them. **[obs]** for everything below unless tagged.
 
 - They are STD and DUMB groups, so their bits are absolute. A muxed
@@ -400,7 +402,8 @@ them. **[obs]** for everything below unless tagged.
 Block type 39 has 132 groups, each with one path; their
 bits are offsets from one block's base (`BLOCK_INFO`: 105 bases, one per
 LAB row in three columns, block size 70 rows × 166 columns).
-`tools/cram/src/m4k.rs` uses them; the README's M4K section has the
+chipsmith's `crates/chipsmith-cyclone2/src/bitstream/m4k.rs` uses them;
+the README's M4K section has the
 values. **[obs]** for everything below unless tagged.
 
 - `RAM_CONTENT_YGR_MEAB` is a single `RAM` mux (`ASMDB_RAM_MUX`, no
