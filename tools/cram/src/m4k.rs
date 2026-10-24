@@ -648,23 +648,40 @@ fn block(a: &Atom, x: u32, y: u32, sigs: &[Signal], subs: &Sublocs, half: Option
         Some(i) => a.name[..=i].to_string(),
         None => String::new(),
     };
-    // A packed half's bits aren't contiguous (s36: one atom holds bits 0-8
-    // and 27-35): its slices are the sublocations on its half, atom bit k
-    // the k-th of them.
-    let half_cells: Option<Vec<u32>> = half.map(|h| {
-        let mut v: Vec<u32> = subs.iter().filter(|((o, p, _), (hh, _))| *o == prefix && *p == 'a' && *hh == h).map(|((_, _, b), _)| *b).collect();
+    // An atom's bits need not be contiguous slices of the RAM: a x36 RAM
+    // split into two x18 atoms gives one of them bits 0-8 and 27-35 (s36,
+    // w13), whatever its first bit number says. Atom bit k is the k-th of
+    // its slices: in a packed block the sublocations on its half, otherwise
+    // the output nets leaving this block's M4K_BUFFERs, if every bit has one.
+    let mut cells: HashMap<char, Vec<u32>> = HashMap::new();
+    if let Some(h) = half {
+        let v = subs.iter().filter(|((o, p, _), (hh, _))| *o == prefix && *p == 'a' && *hh == h).map(|((_, _, b), _)| *b);
+        cells.insert('a', v.collect());
+    } else {
+        for s in sigs {
+            let Some(r) = s.resources.first() else { continue };
+            if r.kind == "M4K_BUFFER" && m4k_tile(r.x, r.y) == Some((x, y)) {
+                let (owner, p, b) = cell_key(&s.name);
+                if owner == prefix {
+                    cells.entry(p).or_default().push(b);
+                }
+            }
+        }
+        cells.retain(|p, v| a.params.get(&format!("port_{p}_data_width")).and_then(|w| w.parse::<usize>().ok()) == Some(v.len()));
+    }
+    for v in cells.values_mut() {
         v.sort();
-        v
-    });
+        v.dedup();
+    }
     // Slice name (bit number of the logical RAM) of atom bit `bit`, and back.
     let slice_of = |p: char, bit: u32| -> u32 {
-        match &half_cells {
+        match cells.get(&p) {
             Some(c) => c.get(bit as usize).copied().unwrap_or(u32::MAX),
             None => bit + first(p),
         }
     };
     let atom_bit = |p: char, slice: u32| -> Option<u32> {
-        match &half_cells {
+        match cells.get(&p) {
             Some(c) => c.iter().position(|&b| b == slice).map(|i| i as u32),
             None => slice.checked_sub(first(p)),
         }
@@ -930,7 +947,7 @@ mod tests {
     #[test]
     fn parses_sublocations() {
         let s = sublocations("x\nsection ram_sublocations {\n ( altsyncram:ram|altsyncram_tbg1:auto_generated|q_b[2], 0, 1);\n}\n").unwrap();
-        assert_eq!(s.get(&("ram|auto_generated|".to_string(), 'b', 2)), Some(&1));
+        assert_eq!(s.get(&("ram|auto_generated|".to_string(), 'b', 2)), Some(&(0, 1)));
         assert_eq!(cell_key("altsyncram:ram|altsyncram_8032:auto_generated|ram_block1a1~PORTBDATAOUT0"), ("ram|auto_generated|ram_block1a1".to_string(), 'b', 0));
     }
 }
