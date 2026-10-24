@@ -382,7 +382,16 @@ them. **[obs]** for everything below unless tagged.
   two-level source muxes like the LAB's: `aux[line]` is the first-level
   bit, `next_mux_selection[line]` the second, the source index being the
   LAB-local line (`LOCAL_INTERCONNECT` index in the rcf) that feeds the
-  pin. 21 sources on column IOEs, 42 on row IOEs.
+  pin. 21 sources on column IOEs, 42 on row IOEs. Column IOEs 0 and 1
+  take both from the local lines of the tile at X+1 (rcf `IO_DATAOUT` and
+  `IO_OE_PIN`).
+- `IO_PIN_MODE` (2 bits, encoded map 1,1,1,3,3,0,2): bit 0 is 1 for a
+  combinational output enable and 0 when the OE register drives it; bit 1
+  is open drain (`open_drain_output`). There is no `IO_USE_OPEN_DRAIN`
+  group in this family. `IO_OE_INVERT` inverts the enable after its mux;
+  an input or a never-enabled output sets it. `IO_*REG_POWERS_UP_HIGH` is
+  a register's power-up value. Observed on the output-enable fuzz designs
+  (`tools/gen_oe.py`).
 - No slew-rate feature exists for these blocks (`IO_USE_SLOW_SLEW` and
   `MIO_SET_*SLEW*` are absent), so Cyclone II slew is not configurable.
 

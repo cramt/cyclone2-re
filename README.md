@@ -493,12 +493,13 @@ writes every feature of every IOE. Features not listed are 0.
 | unused (input tri-stated) | `PIN_MODE` 10, `REG_FEEDS_PIN_OUT` 10, `SELECT_IOST` 110, `OE_INVERT` |
 | unused, other modes | bus hold: + `USE_BUS_HOLD`; pull-up: + `USE_PULL_UP`; driving ground (= unspecified signal): drive 24 mA LVTTL, no `OE_INVERT` |
 | any used pin | `PIN_MODE` 10 (00 with an OE register), both `CE_TO_*REG_TIE_OFF`, `OUTPUT_DUTY_CYCLE` 11 (not on outputs below 3.3 V) |
-| input | `OE_INVERT`; `PAD_TO_CORE_DELAY`#*k* = 110 for each `IO_DATAIN` index *k* the rcf uses (111 if from the input register) |
+| input | `OE_INVERT`; `PAD_TO_CORE_DELAY`#*k* = 110 for each `IO_DATAIN` index *k* the rcf uses, 111 if it carries the input register; with an input register, a path carrying the pad itself stays 000 |
 | output, bidir | drive code (table below), data mux; output only: `SELECT_IOST` 110 (input buffer off) |
+| output enable | always (`oe` vcc): nothing; tri-state: `IO_PIA_TO_OE` mux, `OE_INVERT` if the netlist's `oe` is `!net`; never (`oe` gnd): `OE_INVERT`; open drain: `PIN_MODE` 11 |
 | input buffer | 1.8 / 1.5 V: `SELECT_IOST` 010; 3.3 / 2.5 V: 000 |
 | output tied to 0 / 1 | `DATA_INVERT` / nothing |
 | pull-up, bus hold | `USE_PULL_UP`, `USE_BUS_HOLD` |
-| I/O registers | `*REG_CLK_FAST_MUX` one-hot at row clock buffer + 1 (only buffers 4 and 5 seen, the rest inferred), `USE_CLR_*REG` = 1 (no clear), output register: `REG_FEEDS_PIN_OUT` 10 |
+| I/O registers | `*REG_CLK_FAST_MUX` one-hot at row clock buffer + 1 (only buffers 4 and 5 seen, the rest inferred; the output and OE registers share `OUTREG_CLK_FAST_MUX`, which an OE register alone also sets), `USE_CLR_*REG` = 1 (no clear), `*REG_POWERS_UP_HIGH` for power-up 1, output register: `REG_FEEDS_PIN_OUT` 10, OE register: `PIN_MODE` 00 |
 | ASDO, nCSO unclaimed | input, pull-up, input buffer at the bank's VCCIO |
 | nCEO unclaimed | output, `DATA_INVERT`, bank's default drive (LVTTL code in an LVCMOS bank) |
 
@@ -545,14 +546,61 @@ sides: 121 left, 123 right, 114 top, 114 bottom; the other 15 are JTAG and
 configuration pins). Every check word, including the 6 replicated
 frames', is recomputed. The one miss is not an I/O residual.
 
+**Output enable and bidirectional pins** (`tools/gen_oe.py`, `just oe-fuzz`,
+`tools/oe_fuzz.sh`). The roles campaign's bidirs had their OE routed but
+their input side dead. These designs put every used pin into one of 21
+shapes: tri-state outputs and bidirs with OE from a pin, an inverted pin,
+a LUT or a fabric register; inverted data; open drain (`d ? 1'bz : 0`);
+OE tied high or never driven; OE, output and input registers alone and
+together, including ones that power up high (an inverter after the
+register, or an init of 1); input sides read back through other pins.
+Variants add random drive, pull-up and bus hold (`attr`) or a random
+standard per bank (`std`). How the post-fit netlist says it, observed:
+
+- A tri-state pin is a `cycloneii_io` whose `oe` is a net, `!net` when the
+  enable is inverted (Quartus folds the inverter into the IOE). An
+  `output` port stays in `output` mode (input buffer off) even when
+  tri-stated; an `inout` port is `bidir`.
+- Open drain is `open_drain_output = "true"` with `oe` vcc and the data on
+  `datain`; no asmdb group is named open drain, it is `IO_PIN_MODE` bit 1.
+  An inout that is never driven comes out the same way with data vcc.
+- An enable that folds to 0 (a stuck register) is `oe` gnd: `OE_INVERT`,
+  as on an input.
+- An inverter after an I/O register becomes `*_power_up = "high"` with the
+  inverted signal before it.
+
+In cram's model (`io.rs`) a used pin is `Dir::In(Input)`, `Dir::Out(Output)`
+or `Dir::Bidir(Input, Output)`. An `Output` has data (`OutData::Line` with
+its optional output register, or a constant) and an `OutputEnable`
+(`Always`, `OpenDrain`, `Never`, or `Line` with inversion and its optional OE
+register). The input register carries its own pad-to-core paths. So an OE
+register can't exist without a routed enable, and a constant can't be
+registered. The one cross-field rule, that the output and OE registers share
+one clock, is checked.
+
+| designs | what varies | byte-identical |
+|---|---|---|
+| oe1-3, oereg21/22/25, oeinv53/54 (rules fit here) | shapes above | 8 / 8 |
+| oe4-12 | new pin sets, base shapes | 9 / 9 |
+| oereg23/24/26, oeinv51/52/55/56 | new pin sets, register shapes | 7 / 7 |
+| oeattr31-34 | + drive, pull-up, bus hold | 4 / 4 |
+| oestd41-44 | + random standard per bank | 4 / 4 |
+
+32 of 32, about 2,100 tri-state, bidir and open-drain pins on all four
+sides. The 179 designs above are unchanged (178 of 179). These designs live
+in `specimens/oe/` (Quartus output, not committed).
+
 What is inferred rather than observed: the CFF lane boundaries inside
 unused gaps of the block numbering, and which named setting each learned
-encoded value is (pin mode codes, delay codes). Not covered, so `cram`
-refuses rather than guesses: LVDS and other differential or VREF
-standards, non-default currents outside 3.3-V LVTTL, DDIO, I/O register
-clears and clock enables, an OE register without an output register,
-programmable delays the fitter only picks under timing pressure, and
-PCI clamp (`IO_USE_PCI_DIODE_CLAMP`, never seen set).
+encoded value is (delay codes). The pad-to-core rule for a pin whose
+register and pad both feed the core (the pad's path stays 000) is
+observed on 2 pins only. Not covered, so `cram` refuses rather than
+guesses: LVDS and other differential or VREF standards, non-default
+currents outside 3.3-V LVTTL, DDIO, I/O register clears and clock
+enables, output and OE registers on different clocks (they share one
+clock mux; not tried), programmable delays the fitter
+only picks under timing pressure, and PCI clamp
+(`IO_USE_PCI_DIODE_CLAMP`, never seen set).
 
 ### Open flow (phase 6)
 
@@ -576,7 +624,7 @@ xz files:
 | file | size | contents |
 |---|---|---|
 | `device.bin.xz` | 3.2 MB (41.7 MB raw) | magic `C2RE-DB`, format version, then a [postcard](https://postcard.jamesmunns.com/wire-format) encoding of `db::Stored`: the routing graph (376,788 elements, 210,403 templates) and its 7,996,500 routing bits, stored by column as deltas; the asmdb block tables; the 475 bonded user pins of the F672 package with their IOE, bank and dual-purpose role |
-| `chipdb.txt.xz` | 9.2 MB (124.5 MB raw) | `cram chipdb` output, the input of `nextpnr/cyclone2/gen/arch_gen.py` |
+| `chipdb.txt.xz` | 9.3 MB (124.8 MB raw) | `cram chipdb` output, the input of `nextpnr/cyclone2/gen/arch_gen.py` |
 
 `cram db` writes `device.bin.xz`, reads it back (it must re-encode to the
 same bytes), and exports `chipdb.txt.xz` from what it read back, so the
@@ -641,8 +689,9 @@ to any LUT input; carry LEs keep theirs), output select, LAB clock, the
 four control lines (`LAB_PIA_TO_INPUT`) and which register controls each
 reaches (CE/clear/sync-clear fast-mux maps), carry wires joined LE 15 →
 LE 0 of the LAB below. I/O tiles get IOE bels (data from the IOE's
-`IO_DATA_INPUT` lines, pad-to-core onto both `IO_DATA_IN` paths or the
-clock pin's `CLK_BUFFER`), and 16 clock-control bels sit at their
+`IO_DATA_INPUT` lines, output enable `OE` from its `IO_PIA_TO_OE` lines,
+pad-to-core onto both `IO_DATA_IN` paths or the clock pin's `CLK_BUFFER`;
+dedicated clock inputs have no `OE`), and 16 clock-control bels sit at their
 `CLKBUF_OUT`. Measured: generating it takes 9.5 minutes and 2.6 GB peak
 (himbaechel's python generator and bbasm);
 the binary is 242 MB, and nextpnr-himbaechel needs about 330 MB for a
@@ -652,8 +701,16 @@ small design.
 `nix/nextpnr-cyclone2.nix` against nixpkgs' nextpnr 0.11.1 source; the
 devshell's `nextpnr-himbaechel`). Cells come from `synth/cyclone2.ys`:
 `LCELL_COMB` (LUT4 + carry), `LCELL_FF` (data, clock, enable, async clear,
-sync clear gated by the enable), pin buffers; the packer adds clock
-controls. The maps tie every unused cell input (LUT inputs and CIN to 1,
+sync clear gated by the enable), pin buffers (`CY2_IBUF`, `CY2_OBUF`, and
+`CY2_IOBUF` for tri-state outputs and bidirs: yosys' `tribuf` turns
+`oe ? d : 1'bz` into tri-state buffers and `iopadmap -toutpad/-tinoutpad`
+merges them into it); the packer adds clock controls. The port's direction
+decides an IOBUF's mode, as in Quartus: on an `output` port the input buffer
+stays off, every bit of an `inout` port is a bidir. Inverters into `OE` and
+`DATAOUT` fold into the IOE (`OE_INVERT`, `DATA_INVERT`), constants into
+`OE_CONST`/`OUT_CONST`: an `inout` that is only read is a bidir that never
+drives, which (as Quartus maps it, observed) is an open drain with data 1;
+one driven unconditionally is a bidir with `oe` tied high. The maps tie every unused cell input (LUT inputs and CIN to 1,
 enable to 1, clears to 0), the yosys convention, so the cells can have
 plain simulation models. The packer folds constants into LUT masks as
 Quartus does, except a 1 on DATAC, DATAD or CIN, which it only disconnects:
@@ -706,6 +763,17 @@ makes the fitter keep the routes. Results, observed:
 | lfsr (32-bit, seed from SW, KEY[0] load) | 81 | 219 | 15 s | 100 % | byte-identical | 8.6 ns |
 | uart_tx (115200 8N1 on UART_TXD) | 69 | 217 | 19 s | 100 % | byte-identical | 13.6 ns |
 | picorv32 (RV32I core + ROM, LEDs) | 1,039 | 1,687 | 115 s | 100 % | byte-identical | 0.43 ns |
+| bidir (9 tri-state/bidir pins on GPIO_0 and SRAM_DQ: OE from a switch, inverted, a LUT, a register; open drain; read back to LEDs) | 29 | 169 | 89 s (host at load 50) | 100 % | byte-identical | 16.6 ns |
+
+Tri-state pins go to Quartus as `cycloneii_io` atoms (its VQM reader takes
+no `?:`), the way Quartus' own VQM writer has them, with inverted enables as
+`~net` wires it folds into `OE_INVERT`. Two more cases, observed
+byte-identical without a committed example: an `inout` only read, and one
+driven unconditionally. Adding the `OE` pips changed the chip database, and
+with it nextpnr's placement of lfsr; that new placement is byte-identical
+too, and blinky, lfsr and uart_tx export the same netlist, rcf and RBF with
+the old and the new cram. uart_tx and picorv32 were not re-run through
+Quartus with the new chip database.
 
 Quartus' fitter accepts each placement and routing (all routes preserved,
 no legality errors) and TimeQuest reports positive setup and hold slack.
@@ -721,8 +789,11 @@ order flipped that Quartus never saw, run on a DE2 loaded with `just flash`
 every load. See [JTAG configuration](#jtag-configuration-phase-7).
 
 Gaps: no timing model in nextpnr; no M4K, multipliers or PLLs; I/O is
-3.3-V LVTTL inputs and outputs only (no bidirectional pins, output enable,
-I/O registers or other standards); clocks must come straight from a pin
+3.3-V LVTTL inputs, outputs, tri-state outputs and bidirs only (no I/O
+registers, no other standards, drive strengths, pull-ups or bus hold; the
+cram model has all of these, the yosys/nextpnr side doesn't); an open
+drain written as `d ? 1'bz : 0` becomes a tri-state with constant data, not
+Quartus' open-drain mode (both valid, different bits); clocks must come straight from a pin
 (no logic-driven or inverted clocks); no inverted async clear; registers
 power up 0 (an init of 1 costs inverters).
 
@@ -738,8 +809,8 @@ device database (`db/`, our own format) and our own tools.
 | 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | LAB grid and its CRAM frame/row placement observed; IOE coordinates and their CRAM/CFF bits from pad/pkg + asmdb; M4K/multiplier/clock columns known only as frame widths |
 | 3 | Logic: LUT truth tables, FF modes, carry chains | asmdb decoded. LUT, LE inputs A-D, carry, registers, packing, LAB clocks/CE/aclr/sclr/sload placed by the asmdb, setting values fit on 9 fuzz designs. All 8 held-out counters and all 9 LE fuzz designs byte-identical with the I/O model |
 | 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clocks (pin → clkctrl → GCLK → RCLK → LAB) modelled: graph plus asmdb clkctrl select, checked on 2 clock pins and 4 global nets |
-| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical. Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K, multipliers, PLLs not started |
-| 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins: `just open-build`, no Quartus involved (packing, base image and chip database from the committed `db/`, no Quartus files at use time). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx and picorv32. No timing model, no M4K/multiplier/PLL, no bidirectional or registered I/O |
+| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers incl. OE register and power-up high, output enable incl. inversion, tri-state, bidir and open drain, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical (24/24 held-out output-enable designs). Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K, multipliers, PLLs not started |
+| 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins including tri-state and bidirectional ones: `just open-build`, no Quartus involved (packing, base image and chip database from the committed `db/`, no Quartus files at use time). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx, picorv32 and bidir. No timing model, no M4K/multiplier/PLL, no registered I/O |
 | 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | done: `cram svf` writes the JTAG stream (RBF minus its passive-serial preamble) with a CONF_DONE check; openFPGALoader plays it. Open-built designs run on a DE2. Not done: EPCS (non-volatile) programming |
 
 ## Prior art

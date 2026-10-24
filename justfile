@@ -50,6 +50,10 @@ lab-fuzz out +seeds:
 io-fuzz out campaign +seeds:
     for s in {{seeds}}; do echo $s; done | xargs -P 6 -I{} tools/io_fuzz.sh {{out}}/{{campaign}}{} {} {{campaign}}
 
+# Output-enable / bidir fuzz: one design per seed for a gen_oe.py variant (base, reg, inv, attr, std)
+oe-fuzz out variant +seeds:
+    for s in {{seeds}}; do echo $s; done | xargs -P 6 -I{} tools/oe_fuzz.sh {{out}}/oe{{variant}}{} {} 0.2 {{variant}}
+
 # Assemble each design dir from the model alone and compare with Quartus's RBF
 roundtrip +dirs:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml

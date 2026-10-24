@@ -291,16 +291,18 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
         let clock = [BLOCK_CLK_P, BLOCK_CLK_N].contains(&p.ioe.block);
         let z = pz + if clock { 8 } else { 0 };
         let bel = format!("IOE{z}");
-        let (din, dout) = (format!("{bel}.COMBOUT"), format!("{bel}.DATAOUT"));
+        let (din, dout, oe) = (format!("{bel}.COMBOUT"), format!("{bel}.DATAOUT"), format!("{bel}.OE"));
         {
             let t = ltiles.entry((px, py)).or_default();
             t.wire(&din, "IOE_INTERNAL");
             t.wire(&dout, "IOE_INTERNAL");
             ensure!(!t.bels.iter().any(|b| b.0 == bel), "two pads at X{px} Y{py} z{z}");
-            t.bels.push((bel.clone(), "IOE".into(), z, vec![
-                ("DATAOUT".into(), dout.clone(), false),
-                ("COMBOUT".into(), din.clone(), true),
-            ]));
+            let mut pins = vec![("DATAOUT".into(), dout.clone(), false), ("COMBOUT".into(), din.clone(), true)];
+            if !clock {
+                t.wire(&oe, "IOE_INTERNAL");
+                pins.push(("OE".into(), oe.clone(), false));
+            }
+            t.bels.push((bel.clone(), "IOE".into(), z, pins));
         }
         if clock {
             let g = alias_g(&mut ltiles, &mut members, (px, py), find(px, py, 289, pz as i16, 0)?);
@@ -310,13 +312,16 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
                 let g = alias_g(&mut ltiles, &mut members, (px, py), find(px, py, 301, pz as i16, i)?);
                 ltiles.get_mut(&(px, py)).unwrap().pip(&din, &g);
             }
-            // Column IOEs 0 and 1 take their output from the local lines of
-            // the tile to the right (observed on every column output pin of
-            // the fuzz designs: rcf IO_DATAOUT at X+1).
+            // Column IOEs 0 and 1 take their output and output enable from
+            // the local lines of the tile to the right (observed on every
+            // column output and tri-state pin of the fuzz designs: rcf
+            // IO_DATAOUT and IO_OE_PIN at X+1).
             let ox = px + u32::from(p.ioe.block == BLOCK_COL && pz < 2);
-            for l in db.io.data_sources(p) {
-                let g = alias_g(&mut ltiles, &mut members, (px, py), find(ox, py, 276, 0, l as i16)?);
-                ltiles.get_mut(&(px, py)).unwrap().pip(&g, &dout);
+            for (sink, lines) in [(&dout, db.io.data_sources(p)), (&oe, db.io.oe_sources(p))] {
+                for l in lines {
+                    let g = alias_g(&mut ltiles, &mut members, (px, py), find(ox, py, 276, 0, l as i16)?);
+                    ltiles.get_mut(&(px, py)).unwrap().pip(&g, sink);
+                }
             }
         }
         pads.push((p.name.clone(), format!("X{}Y{py}", 2 * px + 1), bel, p.bank));

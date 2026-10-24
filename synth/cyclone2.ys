@@ -5,6 +5,10 @@
 read_verilog -lib synth/cells_sim.v
 hierarchy -check -top top
 synth -flatten -run :fine -top top
+# `e ? d : 1'bz` -> $tribuf, before `opt -full` (whose -mux_undef takes z
+# for undefined and would drop the enable). iopadmap merges them into the
+# pin buffers.
+tribuf
 memory_map
 opt -full
 techmap -map +/techmap.v -map synth/arith_map.v
@@ -25,7 +29,10 @@ simplemap
 abc -lut 4
 opt -fast
 techmap -map synth/cells_map.v
-iopadmap -bits -inpad CY2_IBUF COMBOUT:PAD -outpad CY2_OBUF DATAOUT:PAD
+# Tri-state outputs and bidirs are one cell, COMBOUT unconnected on an
+# output.
+iopadmap -bits -inpad CY2_IBUF COMBOUT:PAD -outpad CY2_OBUF DATAOUT:PAD \
+    -toutpad CY2_IOBUF OE:DATAOUT:PAD -tinoutpad CY2_IOBUF OE:COMBOUT:DATAOUT:PAD
 opt_clean -purge
 hierarchy -check
 stat

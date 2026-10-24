@@ -12,6 +12,9 @@
  *               -> REGOUT (ENA gates SCLR, as in the hardware).
  *   CY2_IBUF / CY2_OBUF  pins, placed by `--vopt qsf=<file>` location
  *               assignments (`set_location_assignment PIN_x -to port`).
+ *   CY2_IOBUF   tri-state output or bidir: PAD = OE ? DATAOUT : z, COMBOUT =
+ *               PAD (unconnected on an output). OE_INVERT / DATA_INVERT
+ *               fold inverters into the IOE, OE_CONST / OUT_CONST constants.
  *   CLKCTRL     global clock control, inserted here on every clock net.
  */
 
@@ -119,11 +122,37 @@ struct Cyclone2Impl : HimbaechelAPI
                 NetInfo *i = ci->getPort(ctx->id("I"));
                 if (i && i->driver.cell && i->driver.cell->type == id_CY2_OBUF)
                     i->driver.cell->setAttr(id_PORT, ci->name.str(ctx));
+                // CY2_IOBUF's PAD is inout, so it is a user of the net, not
+                // its driver.
+                if (i)
+                    for (auto &usr : i->users)
+                        if (usr.cell->type == id_CY2_IOBUF && usr.port == id_PAD)
+                            usr.cell->setAttr(id_PORT, ci->name.str(ctx));
             } else if (ci->type == ctx->id("$nextpnr_iobuf")) {
-                log_error("bidirectional port %s is not supported yet\n", ctx->nameOf(ci));
+                // An inout port: yosys' iopadmap gives it a CY2_IOBUF only
+                // when a tri-state driver drives it.
+                bool found = false;
+                for (IdString p : {ctx->id("I"), ctx->id("O")}) {
+                    NetInfo *n = ci->getPort(p);
+                    if (!n)
+                        continue;
+                    if (n->driver.cell && n->driver.cell->type == id_CY2_IOBUF) {
+                        n->driver.cell->setAttr(id_PORT, ci->name.str(ctx));
+                        found = true;
+                    }
+                    for (auto &usr : n->users)
+                        if (usr.cell->type == id_CY2_IOBUF && usr.port == id_PAD) {
+                            usr.cell->setAttr(id_PORT, ci->name.str(ctx));
+                            found = true;
+                        }
+                }
+                if (!found)
+                    log_error("inout port %s has no tri-state driver (only `assign p = oe ? d : 1'bz` is supported)\n",
+                              ctx->nameOf(ci));
             }
         }
-        h.remove_nextpnr_iobs({CellTypePort(id_CY2_IBUF, id_PAD), CellTypePort(id_CY2_OBUF, id_PAD)});
+        h.remove_nextpnr_iobs({CellTypePort(id_CY2_IBUF, id_PAD), CellTypePort(id_CY2_OBUF, id_PAD),
+                               CellTypePort(id_CY2_IOBUF, id_PAD)});
 
         dict<std::string, BelId> pin2bel;
         for (auto &pad : ctx->chip_info->packages[0].pads) {
@@ -133,7 +162,7 @@ struct Cyclone2Impl : HimbaechelAPI
         auto port2pin = read_pin_assignments();
         for (auto &cell : ctx->cells) {
             CellInfo *ci = cell.second.get();
-            if (!ci->type.in(id_CY2_IBUF, id_CY2_OBUF))
+            if (!ci->type.in(id_CY2_IBUF, id_CY2_OBUF, id_CY2_IOBUF))
                 continue;
             if (!ci->attrs.count(id_PORT))
                 log_error("pin buffer %s is not connected to a top-level port\n", ctx->nameOf(ci));
@@ -143,12 +172,18 @@ struct Cyclone2Impl : HimbaechelAPI
             // The pad side has no wire in the database; the bel is the pad.
             ci->disconnectPort(id_PAD);
             ci->ports.erase(id_PAD);
+            // A bidir whose input side nothing reads is a tri-state output
+            // (input buffer off, as Quartus' `output` mode).
+            if (NetInfo *o = ci->getPort(id_COMBOUT); ci->type == id_CY2_IOBUF && o && o->users.empty())
+                ci->disconnectPort(id_COMBOUT);
             std::string pin = port2pin.at(port);
             if (!pin2bel.count(pin))
                 log_error("port %s: PIN_%s is not a user I/O pin\n", port.c_str(), pin.c_str());
             BelId bel = pin2bel.at(pin);
             if (!ctx->checkBelAvail(bel))
                 log_error("port %s: PIN_%s is already used\n", port.c_str(), pin.c_str());
+            if (ci->type == id_CY2_IOBUF && ctx->getBelPinWire(bel, id_OE) == WireId())
+                log_error("port %s: PIN_%s is a dedicated clock input, it can't drive\n", port.c_str(), pin.c_str());
             ctx->bindBel(bel, ci, STRENGTH_LOCKED);
             log_info("    %s -> PIN_%s\n", port.c_str(), pin.c_str());
         }
@@ -216,8 +251,11 @@ struct Cyclone2Impl : HimbaechelAPI
                         dead_cells.insert(ci->name);
                         const_luts++;
                     }
-                } else if (ci->type == id_CY2_OBUF && p == id_DATAOUT) {
+                } else if (ci->type.in(id_CY2_OBUF, id_CY2_IOBUF) && p == id_DATAOUT) {
                     ci->setParam(id_OUT_CONST, Property(value ? 1 : 0, 1));
+                    ci->disconnectPort(p);
+                } else if (ci->type == id_CY2_IOBUF && p == id_OE) {
+                    ci->setParam(id_OE_CONST, Property(value ? 1 : 0, 1));
                     ci->disconnectPort(p);
                 } else if (ci->type == id_LCELL_FF && ((p == id_ENA && value) || (p.in(id_ACLR, id_SCLR) && !value))) {
                     ci->disconnectPort(p); // the idle level
@@ -301,6 +339,18 @@ struct Cyclone2Impl : HimbaechelAPI
         return false;
     }
 
+    // The IOE inverts its output data (IO_DATA_INVERT) and its output enable
+    // (IO_OE_INVERT): the flag a pin buffer load folds an inverter into, or
+    // none.
+    static IdString pin_inversion(const PortRef &u)
+    {
+        if (u.cell->type.in(id_CY2_OBUF, id_CY2_IOBUF) && u.port == id_DATAOUT)
+            return id_DATA_INVERT;
+        if (u.cell->type == id_CY2_IOBUF && u.port == id_OE)
+            return id_OE_INVERT;
+        return IdString();
+    }
+
     // An inverter in front of a register can't fold into it, and Quartus
     // would re-create it somewhere of its own choosing. Instead invert the
     // LUT driving the inverter's input and undo that on every other load,
@@ -314,8 +364,7 @@ struct Cyclone2Impl : HimbaechelAPI
         for (auto &u : in->users) {
             if (u.cell == inverter)
                 continue;
-            bool ok = (u.cell->type == id_LCELL_COMB && lut_input_index(u.port) >= 0) ||
-                      (u.cell->type == id_CY2_OBUF && u.port == id_DATAOUT) ||
+            bool ok = (u.cell->type == id_LCELL_COMB && lut_input_index(u.port) >= 0) || pin_inversion(u) != IdString() ||
                       (u.cell->type == id_LCELL_FF && u.port.in(id_ENA, id_SCLR));
             if (!ok)
                 return false;
@@ -331,8 +380,8 @@ struct Cyclone2Impl : HimbaechelAPI
             if (u.cell->type == id_LCELL_COMB) {
                 int i = lut_input_index(u.port);
                 u.cell->setParam(id_LUT_MASK, Property(substitute(u.cell->params.at(id_LUT_MASK).as_int64(), i, i, true), 16));
-            } else if (u.cell->type == id_CY2_OBUF) {
-                toggle(u.cell, id_DATA_INVERT);
+            } else if (IdString flag = pin_inversion(u); flag != IdString()) {
+                toggle(u.cell, flag);
             } else {
                 toggle(u.cell, u.port == id_ENA ? id_ENA_INV : id_SCLR_INV);
             }
@@ -404,10 +453,10 @@ struct Cyclone2Impl : HimbaechelAPI
                             c->setParam(id_LUT_MASK, Property(substitute(m, i, i, true), 16));
                         c->connectPort(u.port, in);
                     }
-                } else if (c->type == id_CY2_OBUF && u.port == id_DATAOUT) {
+                } else if (IdString flag = pin_inversion(u); flag != IdString()) {
                     c->disconnectPort(u.port);
                     c->connectPort(u.port, in);
-                    c->setParam(id_DATA_INVERT, Property(int(inv), 1));
+                    c->setParam(flag, Property(int(inv), 1));
                 } else if (c->type == id_LCELL_FF && u.port == id_DATAIN && !inv) {
                     // A plain buffer in front of a register: the register
                     // takes the source on its sync load path instead.
@@ -790,7 +839,7 @@ struct Cyclone2Impl : HimbaechelAPI
 
     IdString getBelBucketForCellType(IdString cell_type) const override
     {
-        if (cell_type.in(id_CY2_IBUF, id_CY2_OBUF))
+        if (cell_type.in(id_CY2_IBUF, id_CY2_OBUF, id_CY2_IOBUF))
             return id_IOE;
         return cell_type;
     }
@@ -799,7 +848,7 @@ struct Cyclone2Impl : HimbaechelAPI
     {
         IdString bel_type = ctx->getBelType(bel);
         if (bel_type == id_IOE)
-            return cell_type.in(id_CY2_IBUF, id_CY2_OBUF);
+            return cell_type.in(id_CY2_IBUF, id_CY2_OBUF, id_CY2_IOBUF);
         return bel_type == cell_type;
     }
 

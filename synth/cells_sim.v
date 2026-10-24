@@ -23,3 +23,8 @@ endmodule
 (* blackbox *)
 module CY2_OBUF (input DATAOUT, output PAD);
 endmodule
+
+// Tri-state output or bidir: PAD = OE ? DATAOUT : 1'bz, COMBOUT = PAD.
+(* blackbox *)
+module CY2_IOBUF (input DATAOUT, input OE, output COMBOUT, inout PAD);
+endmodule
