@@ -54,6 +54,10 @@ io-fuzz out campaign +seeds:
 oe-fuzz out variant +seeds:
     for s in {{seeds}}; do echo $s; done | xargs -P 6 -I{} tools/oe_fuzz.sh {{out}}/oe{{variant}}{} {} 0.2 {{variant}}
 
+# M4K fuzz: one design per `<name> <json config>` line of a jobs file (tools/gen_m4k.py keys)
+m4k-fuzz out jobs:
+    grep -v '^#' {{jobs}} | while read -r name cfg; do printf '%s\0%s\0' "$name" "$cfg"; done | xargs -0 -n 2 -P 6 sh -c 'tools/m4k_fuzz.sh {{out}}/$0 "$1"'
+
 # Assemble each design dir from the model alone and compare with Quartus's RBF
 roundtrip +dirs:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml

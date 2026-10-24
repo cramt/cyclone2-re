@@ -395,6 +395,34 @@ them. **[obs]** for everything below unless tagged.
 - No slew-rate feature exists for these blocks (`IO_USE_SLOW_SLEW` and
   `MIO_SET_*SLEW*` are absent), so Cyclone II slew is not configurable.
 
+#### M4K groups
+
+Block type 39 has 132 groups, each with one path; their
+bits are offsets from one block's base (`BLOCK_INFO`: 105 bases, one per
+LAB row in three columns, block size 70 rows × 166 columns).
+`tools/cram/src/m4k.rs` uses them; the README's M4K section has the
+values. **[obs]** for everything below unless tagged.
+
+- `RAM_CONTENT_YGR_MEAB` is a single `RAM` mux (`ASMDB_RAM_MUX`, no
+  polarity mux) of 4,608 bits: the memory, bit `col × 128 + row` of the
+  128 × 36 array.
+- The 88 `RAM_MS_*_INPUT` and `RAM_PIA_TO_INPUT_YGR` groups are two-level
+  source muxes (a `MAPPED_SIMPLE` first level of 10 entries, a simple
+  second level of 3) over 87 sources; the source is the rcf
+  `LOCAL_INTERCONNECT` index at the block's tile. Level-0 entries of −5
+  are padding no source maps to. `DATA_INPUT` 18+k and `DATA_INPUT_B` k,
+  `BYTE_ENABLE_INPUT` 2+k and `_B` k list the same bits.
+- The control fast muxes (`RAM_CLOCK_`, `_CE_`, `_CLEAR_`, `_WE_`,
+  `_RE_FAST_MUX`) are `MAPPED_ENCODED`: the map, indexed by source (0-7
+  control inputs, 8-13 row clocks; on some muxes a last entry holds the
+  unused value), gives the bit pattern to
+  write, bit *i* of the value being mux bit *i*. −2 marks a source the mux
+  can't take. The same reading fits `RAM_DATA_WRITE_MODE` (map index →
+  bit number), `RAM_REG_DATA_OUT` (map [1, 0]) and the unused-block values
+  `cram blank` writes.
+- `RAM_USAGE_MODE` (26 bits, map of 5) never changed in any design;
+  what it encodes is open.
+
 libddb_bcm2bits.so reads `*.bcm.xml` files. No such files exist for
 `cycloneii`, so it plays no part in this family. **[inf]**
 
@@ -519,7 +547,8 @@ ASM node count equal to element count, and all edges inside the graph.
   [timing-model.md](timing-model.md#element-enum-names).
 - The meaning of exclusion groups, and of the
   `use_encoded_setting`/`is_encoded_bit_high` bits (about 1.5% of bits).
-- `asmdb`: M4K, MAC and PLL group semantics (decoded, unused); IOE
+- `asmdb`: MAC and PLL group semantics (decoded, unused); M4K
+  `RAM_USAGE_MODE` and the address-stall inputs; IOE
   features the I/O fuzz designs never exercised (DDIO, LVDS, register
   clears/enables, non-default delay chains); `asmdb_dirt`, `place` and
   `timing`.

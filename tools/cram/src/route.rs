@@ -41,6 +41,9 @@ pub fn element_enum(kind: &str) -> Option<i16> {
         // Top/bottom I/O clock spine (`BIOCLK..`/`TIOCLK..`): GCLK -> I/O
         // row clock buffers, like LAB_CLK for LABs.
         "TB_IO_CLK" => 298,
+        // M4K data out onto the routing (M4K fuzz designs: every output's
+        // first hop is an edge from this element).
+        "M4K_BUFFER" => 278,
         _ => return None,
     })
 }

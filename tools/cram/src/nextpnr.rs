@@ -456,7 +456,7 @@ impl Routed {
                 }
                 ("CLKCTRL", Bel::ClkCtrl { g }) => {
                     let input = *clk_in.get(&g).with_context(|| format!("{name}: input not routed"))?;
-                    clkctrls.push(ClkCtrl { g: g as u8, input });
+                    clkctrls.push(ClkCtrl { g: g as u8, input, core_line: None });
                 }
                 ("CY2_IBUF" | "CY2_OBUF" | "CY2_IOBUF", Bel::Ioe { x, y, z }) => {
                     let p = pin_at(io, x, y, z)?;
@@ -549,6 +549,7 @@ impl Routed {
             logic: Logic { les: les.into_values().collect(), clkctrls, labs },
             pins,
             unused_pins: UnusedPins::InputTriStated,
+            m4ks: vec![],
             nets,
         })
     }

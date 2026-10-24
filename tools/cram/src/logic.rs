@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use ddb::asmdb::arch;
 
 use crate::lab::LabDb;
+use crate::m4k::instance_path;
 use crate::rcf::Signal;
 use crate::vo::{self, Atom};
 
@@ -128,6 +129,9 @@ pub struct LabConfig {
 pub struct ClkCtrl {
     pub g: u8,
     pub input: u8,
+    /// For a core-driven input (rcf `LOCAL_INTERCONNECT` ->
+    /// `BLOCK_INPUT_MUX` -> `CLKBUF_IN`): the LAB line it takes.
+    pub core_line: Option<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -191,6 +195,8 @@ impl Logic {
 
         // Routing facts per LE / LAB, from the rcf.
         let mut inputs: HashMap<(u32, u32, u32), [Option<LeSource>; 4]> = HashMap::new();
+        // LEs whose LUT (not register sdata) takes a routed datac.
+        let mut lut_c_routed: std::collections::HashSet<(u32, u32, u32)> = Default::default();
         let mut ctl: HashMap<(u32, u32, u32), HashMap<String, u8>> = HashMap::new(); // port -> pia
         let mut glob: HashMap<(u32, u32, u32), HashMap<String, u8>> = HashMap::new(); // port -> buf
         let mut outputs: HashMap<(u32, u32, u32), [Option<String>; 3]> = HashMap::new();
@@ -201,10 +207,10 @@ impl Logic {
                 match r.kind.as_str() {
                     "LE_BUFFER" => {
                         let o = outputs.entry((x, y, r.index as u32 / 2)).or_default();
-                        o[r.index as usize % 2] = Some(s.name.clone());
+                        o[r.index as usize % 2] = Some(instance_path(&s.name));
                     }
                     "LOCAL_LINE" => {
-                        outputs.entry((x, y, r.index as u32)).or_default()[2] = Some(s.name.clone());
+                        outputs.entry((x, y, r.index as u32)).or_default()[2] = Some(instance_path(&s.name));
                     }
                     "LAB_CONTROL_MUX" => {
                         let prev = s.parents[i].map(|j| &s.resources[j]);
@@ -219,7 +225,7 @@ impl Logic {
                 }
             }
             for d in &s.dests {
-                let Some(&loc) = cell.get(&d.cell) else { continue };
+                let Some(&loc) = cell.get(&instance_path(&d.cell)) else { continue };
                 let Some(r) = d.from.map(|i| &s.resources[i]) else { continue };
                 match r.kind.as_str() {
                     "LOCAL_INTERCONNECT" | "LOCAL_LINE" => {
@@ -230,6 +236,9 @@ impl Logic {
                             LeSource::Line(r.index as u8)
                         };
                         inputs.entry(loc).or_default()[p] = Some(src);
+                        if p == 2 && d.physical_port() != "SDATA" {
+                            lut_c_routed.insert(loc);
+                        }
                     }
                     "LAB_CONTROL_MUX" => {
                         ctl.entry(loc).or_default().insert(d.port.clone(), r.index as u8);
@@ -300,7 +309,9 @@ impl Logic {
                 // Own register on datac without a routed input: the
                 // register feedback path (counter LSB: `cnt[0]~75`).
                 let own = ff.and_then(|f| f.port("regout"));
-                c.reg_feedback = own.is_some() && comb.port("datac") == own && c.inputs[2].is_none();
+                // The routed datac may carry the register's sdata instead
+                // (packed register with sload high, M4K design d16).
+                c.reg_feedback = own.is_some() && comb.port("datac") == own && !lut_c_routed.contains(&(x, y, le));
             }
             if let Some(ff) = ff {
                 let g = glob.get(&(x, y, le));
@@ -354,11 +365,18 @@ impl Logic {
         // match them up by tile and z.
         let mut ins: HashMap<(i16, i16, i16), u8> = HashMap::new();
         let mut outs: HashMap<(i16, i16, i16), u8> = HashMap::new();
+        let mut cores: HashMap<(i16, i16, i16), u8> = HashMap::new();
         for s in sigs {
             for (i, r) in s.resources.iter().enumerate() {
                 match r.kind.as_str() {
                     "CLKBUF_IN" => {
                         ins.insert((r.x, r.y, r.z), r.index as u8);
+                        let up = |j: Option<usize>| j.map(|j| (j, &s.resources[j]));
+                        if let Some((j, _)) = up(s.parents[i]).filter(|(_, p)| p.kind == "BLOCK_INPUT_MUX") {
+                            if let Some((_, l)) = up(s.parents[j]).filter(|(_, p)| p.kind == "LOCAL_INTERCONNECT") {
+                                cores.insert((r.x, r.y, r.z), l.index as u8);
+                            }
+                        }
                     }
                     "GLOBAL_CLK_H" => {
                         if let Some(p) = s.parents[i].map(|p| &s.resources[p]).filter(|p| p.kind == "CLKBUF_OUT") {
@@ -371,7 +389,10 @@ impl Logic {
         }
         for (k, &g) in &outs {
             let input = *ins.get(k).with_context(|| format!("clock control at {k:?} has no CLKBUF_IN"))?;
-            out.clkctrls.push(ClkCtrl { g, input });
+            if clkctrl_select_code(input).is_none() {
+                unmodelled.push(format!("clock control G{g}: input {input} (select code unknown)"));
+            }
+            out.clkctrls.push(ClkCtrl { g, input, core_line: cores.get(k).copied() });
         }
         Ok((out, unmodelled))
     }
@@ -388,10 +409,17 @@ impl Logic {
             // design; in use: the input index, LSB first, and enable 1
             // (counter and fuzz designs, G2/G3/G6/G8/G10/G11/G15).
             let sel = &db.clkctrl_select[c.g as usize];
+            let code = clkctrl_select_code(c.input).with_context(|| format!("clock control G{}: input {}", c.g, c.input))?;
             for (k, &b) in sel.iter().enumerate() {
-                out.push((b as u32, c.input >> k & 1 == 1));
+                out.push((b as u32, code >> k & 1 == 1));
             }
             out.push((db.clkctrl_enable[c.g as usize] as u32, true));
+            if let Some(line) = c.core_line {
+                // Source = the LAB line, like an LE input mux (v5: G0 line 24).
+                for b in db.clkctrl_corein[c.g as usize].source_bits(0, line as usize)? {
+                    out.push((b as u32, true));
+                }
+            }
         }
         for (&(x, y), l) in &self.labs {
             lab_bits(db, x, y, l, &mut out).with_context(|| format!("LAB X{x} Y{y} {l:?}"))?;
@@ -411,6 +439,19 @@ pub type Domain = (u8, bool, Option<Ctl>);
 /// enabled domain's line fixes its LAB clock; the rest fill in inverted
 /// clocks first, then lowest buffer (fit to the two-clock fuzz LABs: 6
 /// non-inverted pairs, 1 inverted/non-inverted pair).
+/// `CLKBUF_CLK_INPUT_SELECT` code (LSB first) of clock-control input
+/// `CLKBUF_IN` index. The dedicated clock pins (0/1) and a core signal
+/// through `BLOCK_INPUT_MUX` (4: M4K designs v5, v11) select as their index;
+/// a user pin through the clock delay control (6) selects 5 (s8c). The other
+/// inputs were never seen, so they have no code here.
+pub fn clkctrl_select_code(input: u8) -> Option<u8> {
+    match input {
+        0 | 1 | 4 => Some(input),
+        6 => Some(5),
+        _ => None,
+    }
+}
+
 pub fn clock_slots(domains: &[Domain]) -> Result<[Option<Domain>; 2]> {
     let mut v = domains.to_vec();
     v.sort_by_key(|d| (!d.1, d.0, d.2));

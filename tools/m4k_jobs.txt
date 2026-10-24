@@ -1,0 +1,103 @@
+# M4K fuzz designs: <name> <tools/gen_m4k.py config>. just m4k-fuzz <out> <this file>
+# runs them all (strip the lines you don't want); the lin* designs need only
+# their RBF (NO_BA=1 tools/m4k_fuzz.sh skips back-annotation).
+# fit: content layout
+lin0 {"mode":"single","wa":8,"init":{"linear":0}}
+lin1 {"mode":"single","wa":8,"init":{"linear":1}}
+lin2 {"mode":"single","wa":8,"init":{"linear":2}}
+lin3 {"mode":"single","wa":8,"init":{"linear":3}}
+lin4 {"mode":"single","wa":8,"init":{"linear":4}}
+lin5 {"mode":"single","wa":8,"init":{"linear":5}}
+lin6 {"mode":"single","wa":8,"init":{"linear":6}}
+lin7 {"mode":"single","wa":8,"init":{"linear":7}}
+lin8 {"mode":"single","wa":8,"init":{"linear":8}}
+lin9 {"mode":"single","wa":8,"init":{"linear":9}}
+lin10 {"mode":"single","wa":8,"init":{"linear":10}}
+lin11 {"mode":"single","wa":8,"init":{"linear":11}}
+# fit: one feature each
+a0 {"mode":"single","wa":8,"init":{"seed":1}}
+s1 {"mode":"single","wa":1,"init":{"seed":11}}
+s2 {"mode":"single","wa":2,"init":{"seed":12}}
+s4 {"mode":"single","wa":4,"init":{"seed":13}}
+s9 {"mode":"single","wa":9,"init":{"seed":14}}
+s16 {"mode":"single","wa":16,"init":{"seed":15}}
+s18 {"mode":"single","wa":18,"init":{"seed":16}}
+s32 {"mode":"single","wa":32,"init":{"seed":17}}
+s36 {"mode":"single","wa":36,"init":{"seed":18}}
+s8r {"mode":"single","wa":8,"outreg_a":"clock0","init":{"seed":19}}
+s8e {"mode":"single","wa":8,"clken":true,"init":{"seed":20}}
+s8c {"mode":"single","wa":8,"outreg_a":"clock0","aclr":true,"init":{"seed":21}}
+s16b {"mode":"single","wa":16,"byteena":true,"init":{"seed":22}}
+s8n {"mode":"single","wa":8}
+d8 {"mode":"dual","wa":8,"init":{"seed":23}}
+d16 {"mode":"dual","wa":16,"init":{"seed":24}}
+d36 {"mode":"dual","wa":36,"init":{"seed":25}}
+d1 {"mode":"dual","wa":1,"init":{"seed":26}}
+d32x8 {"mode":"dual","wa":32,"wb":8,"init":{"seed":27}}
+d8x32 {"mode":"dual","wa":8,"wb":32,"init":{"seed":28}}
+d8r {"mode":"dual","wa":8,"outreg_b":"clock0","init":{"seed":29}}
+d8k {"mode":"dual","wa":8,"clk1":true,"outreg_b":"clock1","init":{"seed":30}}
+d8o {"mode":"dual","wa":8,"rdw":"OLD_DATA","init":{"seed":31}}
+b8 {"mode":"bidir","wa":8,"init":{"seed":32}}
+b18 {"mode":"bidir","wa":18,"init":{"seed":33}}
+b16x4 {"mode":"bidir","wa":16,"wb":4,"init":{"seed":34}}
+r8 {"mode":"rom","wa":8,"init":{"seed":35}}
+r36 {"mode":"rom","wa":36,"init":{"seed":36}}
+# held out, batch h
+h0 {"mode":"bidir","wa":8,"init":{"seed":101263},"wb":1,"outreg_b":"none","rdw":"OLD_DATA","outreg_a":"none","clken":true,"deep":2}
+h1 {"mode":"single","wa":18,"init":{"seed":123963},"outreg_a":"none","deep":2}
+h2 {"mode":"dual","wa":1,"init":{"seed":463642},"wb":1,"outreg_b":"none","clk1":true,"rdw":"OLD_DATA","outreg_a":"clock0","deep":2}
+h3 {"mode":"dual","wa":9,"init":{"seed":780974},"wb":9,"outreg_b":"none"}
+h4 {"mode":"rom","wa":4,"init":{"seed":520988},"outreg_a":"none"}
+h5 {"mode":"dual","wa":4,"init":{"seed":941273},"wb":4,"outreg_b":"none","clk1":true,"clken":true,"deep":2}
+h6 {"mode":"single","wa":16,"init":{"seed":657976},"outreg_a":"clock0"}
+h7 {"mode":"single","wa":8,"init":{"seed":136314},"outreg_a":"none"}
+h8 {"mode":"single","wa":4,"init":{"seed":809063},"outreg_a":"clock0","clken":true,"deep":2}
+h9 {"mode":"single","wa":1,"init":{"seed":457614},"outreg_a":"clock0","clken":true,"aclr":"logic"}
+h10 {"mode":"rom","wa":2,"init":{"seed":942014},"outreg_a":"clock0"}
+h11 {"mode":"dual","wa":32,"init":{"seed":870939},"wb":4,"outreg_b":"none","rdw":"OLD_DATA","outreg_a":"none","deep":2}
+h12 {"mode":"bidir","wa":2,"init":{"seed":878594},"wb":16,"outreg_b":"clock0","rdw":"OLD_DATA","outreg_a":"none"}
+h13 {"mode":"single","wa":18,"init":{"seed":834812},"outreg_a":"clock0","byteena":true,"deep":2}
+# held out, batch v (Quartus rejects v2: dual-clock true dual port; v13: unused aclr)
+v0 {"mode":"single","wa":1,"init":{"seed":28446},"outreg_a":"clock0"}
+v1 {"mode":"rom","wa":4,"init":{"seed":375550},"outreg_a":"clock0","clken":true}
+v3 {"mode":"rom","wa":32,"init":{"seed":660979},"outreg_a":"none"}
+v4 {"mode":"single","wa":8,"init":{"seed":541421},"outreg_a":"none","clken":true}
+v5 {"mode":"dual","wa":2,"init":{"seed":572215},"wb":16,"outreg_b":"clock0","clken":true,"aclr":"logic","deep":2}
+v6 {"mode":"bidir","wa":9,"init":{"seed":59194},"wb":9,"outreg_b":"none","rdw":"OLD_DATA","outreg_a":"none"}
+v7 {"mode":"dual","wa":8,"init":{"seed":969979},"wb":2,"outreg_b":"none","outreg_a":"none"}
+v8 {"mode":"single","wa":9,"init":{"seed":448639},"outreg_a":"clock0","deep":2}
+v9 {"mode":"single","wa":8,"init":{"seed":898805},"outreg_a":"none"}
+v10 {"mode":"bidir","wa":18,"init":{"seed":567641},"wb":18,"outreg_b":"clock0","outreg_a":"none"}
+v11 {"mode":"bidir","wa":2,"init":{"seed":824461},"wb":16,"outreg_b":"clock0","outreg_a":"clock0","clken":true,"aclr":"logic"}
+v12 {"mode":"single","wa":2,"init":{"seed":528951},"outreg_a":"clock0","clken":true}
+# held out, batch w
+w0 {"mode":"single","wa":9,"init":{"seed":632975},"outreg_a":"none","clken":true,"deep":2}
+w1 {"mode":"rom","wa":18,"init":{"seed":702168},"outreg_a":"none","clken":true}
+w2 {"mode":"single","wa":1,"init":{"seed":326141},"outreg_a":"clock0"}
+w3 {"mode":"dual","wa":16,"init":{"seed":314183},"wb":2,"outreg_b":"none","clken":true}
+w4 {"mode":"dual","wa":9,"init":{"seed":825194},"wb":18,"outreg_b":"none","clken":true,"deep":2}
+w5 {"mode":"dual","wa":18,"init":{"seed":395563},"wb":9,"outreg_b":"none","clk1":true,"outreg_a":"clock0","clken":true}
+w6 {"mode":"single","wa":4,"init":{"seed":453485},"outreg_a":"clock0","deep":2}
+w7 {"mode":"bidir","wa":18,"init":{"seed":117309},"wb":18,"outreg_b":"none","rdw":"OLD_DATA","outreg_a":"clock0","clken":true}
+w8 {"mode":"single","wa":18,"init":{"seed":159184},"outreg_a":"none","byteena":true}
+w9 {"mode":"rom","wa":2,"init":{"seed":557243},"outreg_a":"clock0"}
+w10 {"mode":"single","wa":9,"init":{"seed":403875},"outreg_a":"clock0","clken":true,"aclr":"logic"}
+w11 {"mode":"single","wa":18,"init":{"seed":511109},"outreg_a":"none"}
+w12 {"mode":"single","wa":32,"init":{"seed":4242},"outreg_a":"clock0","clken":true}
+w13 {"mode":"single","wa":36,"init":{"seed":4343},"outreg_a":"none","deep":2}
+# held out, batch x
+x0 {"mode":"dual","wa":32,"init":{"seed":58536},"wb":4,"outreg_b":"none"}
+x1 {"mode":"single","wa":1,"init":{"seed":784297},"outreg_a":"none"}
+x2 {"mode":"single","wa":2,"init":{"seed":204800},"outreg_a":"none","deep":2}
+x3 {"mode":"single","wa":8,"init":{"seed":885517},"outreg_a":"none","deep":2}
+x4 {"mode":"single","wa":2,"init":{"seed":486920},"outreg_a":"clock0","clken":true}
+x5 {"mode":"dual","wa":4,"init":{"seed":404397},"wb":16,"outreg_b":"none"}
+x6 {"mode":"dual","wa":18,"init":{"seed":521314},"wb":36,"outreg_b":"clock0","clken":true,"aclr":"logic","byteena":true}
+x7 {"mode":"single","wa":9,"init":{"seed":1026020},"outreg_a":"none"}
+x8 {"mode":"bidir","wa":4,"init":{"seed":134903},"wb":16,"outreg_b":"none","rdw":"OLD_DATA","outreg_a":"clock0","clken":true,"aclr":"logic"}
+x9 {"mode":"dual","wa":36,"init":{"seed":516363},"wb":18,"outreg_b":"clock1","clk1":true,"clken":true,"byteena":true}
+x10 {"mode":"single","wa":9,"init":{"seed":195389},"outreg_a":"clock0","deep":2}
+x11 {"mode":"single","wa":8,"init":{"seed":760824},"outreg_a":"clock0","deep":2}
+x12 {"mode":"single","wa":32,"init":{"seed":5151},"outreg_a":"none","deep":2}
+x13 {"mode":"dual","wa":36,"wb":36,"init":{"seed":5252},"outreg_b":"clock0","deep":2}
