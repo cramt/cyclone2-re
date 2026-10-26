@@ -12,6 +12,7 @@ use chipsmith_cyclone2::bitstream::hard::HardInput;
 use chipsmith_cyclone2::bitstream::io::{IoDb, BLOCK_COL};
 use chipsmith_cyclone2::bitstream::m4k;
 use chipsmith_cyclone2::bitstream::nextpnr::{flag, lut_mask, perms, pin_at, split_port, Bel, Cell, IoePin, LePin, M4kPin, M4kShape, PortDir, Routed, Wire};
+use chipsmith_cyclone2::pin::{assignment, register_param};
 
 /// Output pins of the CY2_JTAG and CY2_ASMI cells.
 const HARD_OUTPUTS: [&str; 9] =
@@ -135,8 +136,11 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                 ("LCELL_COMB", "COUT") => format!("{a}_cout"),
                 ("LCELL_FF", "REGOUT") => format!("{a}_regout"),
                 ("CLKCTRL", "OUTCLK") => format!("{a}_outclk"),
-                ("CY2_IBUF", "COMBOUT") => a.clone(),
-                ("CY2_IOBUF", "COMBOUT") => format!("{a}_combout"),
+                // A plain input is a port of the netlist; an input with its
+                // register is an I/O atom, like any other pin.
+                ("CY2_IBUF", "COMBOUT") if !c.params.contains_key(register_param::INPUT) => a.clone(),
+                ("CY2_IBUF" | "CY2_IOBUF", "COMBOUT") => format!("{a}_combout"),
+                ("CY2_IBUF" | "CY2_IOBUF", "REGOUT") => format!("{a}_regout"),
                 ("CY2_M4K", o) if o.starts_with("DO") => format!("{a}_q{}", &o[2..]),
                 ("CY2_JTAG", o) if HARD_OUTPUTS.contains(&o) => format!("{a}_{}", o.to_lowercase()),
                 ("CY2_ASMI", "DATA0OUT") => format!("{a}_data0out"),
@@ -154,7 +158,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
     for (name, c) in &r.cells {
         for (p, &id) in &c.conns {
             let ram_out = (c.ty == "CY2_M4K" && p.starts_with("DO")) || HARD_OUTPUTS.contains(&p.as_str());
-            if !["COMBOUT", "COUT", "REGOUT", "OUTCLK"].contains(&p.as_str()) && !(c.ty == "CY2_IBUF") && !ram_out {
+            if !["COMBOUT", "COUT", "REGOUT", "OUTCLK"].contains(&p.as_str()) && !(c.ty == "CY2_IBUF" && p != "INCLK") && !ram_out {
                 loads.entry(id).or_default().push((name.as_str(), p.as_str()));
             }
         }
@@ -237,6 +241,15 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
     // own feeders and folds inverters into neighbours.
     for a in ["REMOVE_REDUNDANT_USER_CELLS", "REMOVE_REDUNDANT_LOGIC_CELLS", "REMOVE_DUPLICATE_REGISTERS", "REMOVE_DUPLICATE_LOGIC"] {
         writeln!(qsf, "set_global_assignment -name {a} OFF")?;
+    }
+    // The DE2 powers every bank at 3.3 V; Quartus would otherwise take a
+    // bank's VCCIO from its pins (2.5 V for one holding only 2.5-V
+    // inputs), and its unclaimed dual-purpose pins with it.
+    for bank in 1..=8 {
+        writeln!(qsf, "set_global_assignment -name IOBANK_VCCIO 3.3V -section_id {bank}")?;
+    }
+    if let Some(mode) = r.attrs.get(assignment::UNUSED_PINS) {
+        writeln!(qsf, "set_global_assignment -name {} \"{mode}\"", assignment::UNUSED_PINS)?;
     }
     writeln!(qsf, "set_global_assignment -name ROUTING_BACK_ANNOTATION_MODE NORMAL")?;
     writeln!(qsf, "set_global_assignment -name ROUTING_BACK_ANNOTATION_FILE ../routing.rcf")?;
@@ -409,20 +422,31 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
             Bel::Ioe { x, y, z } => {
                 let p = &atom[name.as_str()];
                 writeln!(qsf, "set_location_assignment PIN_{} -to {p}", pin_at(io, x, y, z)?.name)?;
+                // The pin's I/O settings, already Quartus assignments.
+                for k in assignment::PIN {
+                    if let Some(val) = c.params.get(k) {
+                        writeln!(qsf, "set_instance_assignment -name {k} \"{val}\" -to {p}")?;
+                    }
+                }
                 let cnst = |k: &String| if k.ends_with('1') { "1'b1".to_string() } else { "1'b0".to_string() };
                 let bidir = r.port_dir(p)? == PortDir::InOut;
-                if c.ty == "CY2_OBUF" && !bidir {
+                let reg = |param: &str| c.params.get(param).map(String::as_str);
+                let (in_reg, out_reg, oe_reg) = (reg(register_param::INPUT), reg(register_param::OUTPUT), reg(register_param::OE));
+                if c.ty == "CY2_IBUF" && in_reg.is_none() {
+                    // A port of the netlist.
+                } else if c.ty == "CY2_OBUF" && !bidir && out_reg.is_none() {
                     let inv = if flag(c, "DATA_INVERT") { "~" } else { "" };
                     let d = match c.params.get("OUT_CONST") {
                         Some(k) => cnst(k),
                         None => format!("{inv}{}", net(c, "DATAOUT", "1'b0")),
                     };
                     writeln!(v, "assign {} = {d};", vid(p))?;
-                } else if c.ty != "CY2_IBUF" {
+                } else {
                     // The VQM reader takes no `?:`, so a tri-state pin
                     // is an I/O atom, the way Quartus' own VQM writer
                     // has it; so is any pin of an inout port (Quartus
-                    // wants it in bidir mode). Inverted copies fold into the IOE
+                    // wants it in bidir mode), and any pin using its
+                    // registers. Inverted copies fold into the IOE
                     // (IO_DATA_INVERT, IO_OE_INVERT), as `__ALT_INV__`
                     // wires do in Quartus' VQMs.
                     let pin_net = |port: &str, const_param: &str, inv: &str, invert: &mut dyn FnMut(String) -> String| {
@@ -436,7 +460,9 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                     // An inout that never drives is written the way
                     // Quartus maps one: an open drain with data 1.
                     let never = c.ty == "CY2_IOBUF" && c.params.get("OE_CONST").is_some_and(|k| !k.ends_with('1'));
-                    let (d, oe) = if never {
+                    let (d, oe) = if c.ty == "CY2_IBUF" {
+                        ("1'b0".to_string(), "1'b0".to_string())
+                    } else if never {
                         ("1'b1".to_string(), "1'b1".to_string())
                     } else if c.ty == "CY2_OBUF" {
                         (pin_net("DATAOUT", "OUT_CONST", "DATA_INVERT", &mut invert)?, "1'b1".to_string())
@@ -449,13 +475,29 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                     let io = vid(&format!("{p}~I"));
                     writeln!(v, "cycloneii_io {io}(")?;
                     writeln!(v, "  .datain({d}),\n  .oe({oe}),")?;
-                    if c.conns.contains_key("COMBOUT") {
-                        writeln!(v, "  .combout({}),", net(c, "COMBOUT", ""))?;
+                    for (port, pin) in [("outclk", "OUTCLK"), ("inclk", "INCLK")] {
+                        if c.conns.contains_key(pin) {
+                            writeln!(v, "  .{port}({}),", net(c, pin, "1'b0"))?;
+                        }
+                    }
+                    for (port, pin) in [("combout", "COMBOUT"), ("regout", "REGOUT")] {
+                        if c.conns.contains_key(pin) {
+                            writeln!(v, "  .{port}({}),", net(c, pin, ""))?;
+                        }
                     }
                     writeln!(v, "  .padio({}));", vid(p))?;
-                    writeln!(v, "defparam {io}.operation_mode = \"{}\";", if bidir { "bidir" } else { "output" })?;
-                    for r in ["input", "output", "oe"] {
-                        writeln!(v, "defparam {io}.{r}_register_mode = \"none\";")?;
+                    let mode = match (c.ty.as_str(), bidir) {
+                        (_, true) => "bidir",
+                        ("CY2_IBUF", _) => "input",
+                        _ => "output",
+                    };
+                    writeln!(v, "defparam {io}.operation_mode = \"{mode}\";")?;
+                    for (r, used) in [("input", in_reg), ("output", out_reg), ("oe", oe_reg)] {
+                        let m = if used.is_some() { "register" } else { "none" };
+                        writeln!(v, "defparam {io}.{r}_register_mode = \"{m}\";")?;
+                        if let Some(power_up) = used {
+                            writeln!(v, "defparam {io}.{r}_power_up = \"{power_up}\";")?;
+                        }
                     }
                     if never {
                         writeln!(v, "defparam {io}.open_drain_output = \"true\";")?;
@@ -602,6 +644,10 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                                 M4kPin::Ctl(_) => bail!("{}: M4K control input as a sink", n.name),
                             };
                             format!("dest = ( {}, {port} );", atom[*c])
+                        }
+                        Wire::Ioe { x, y, z, pin: pin @ (IoePin::InClk | IoePin::OutClk) } => {
+                            let c = cell_at.get(&Bel::Ioe { x, y, z }).context("pin cell at its clock")?;
+                            format!("dest = ( {}, {} );", atom[*c], if pin == IoePin::InClk { "INCLK" } else { "OUTCLK" })
                         }
                         w => bail!("{}: sink {w:?}", n.name),
                     };

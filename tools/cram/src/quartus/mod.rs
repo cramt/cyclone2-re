@@ -41,5 +41,5 @@ pub fn load(dev: &Device, dir: &Path) -> Result<Loaded> {
     let mut unmodelled = unmodelled;
     unmodelled.extend(ram_unmodelled);
     unmodelled.extend(pll_unmodelled);
-    Ok(Loaded { design: PhysDesign { logic, pins, unused_pins, m4ks, hard, plls, nets }, unmodelled, skipped_resources: skipped.len() })
+    Ok(Loaded { design: PhysDesign { logic, pins, unused_pins, vccio: chipsmith_cyclone2::bitstream::io::Vccio::FromPins, m4ks, hard, plls, nets }, unmodelled, skipped_resources: skipped.len() })
 }
