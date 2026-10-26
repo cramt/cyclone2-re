@@ -52,7 +52,9 @@ source = "git+https://github.com/A-H-Technology/chipsmith?rev=d7b9885842f0e0c03e
 dependencies = [
  "anyhow",
  "chipsmith-jtag",
+ "chipsmith-netlist",
  "chipsmith-route",
+ "chipsmith-synth",
  "lzma-rust2",
  "postcard",
  "rustc-hash",
@@ -70,6 +72,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chipsmith-netlist"
+version = "0.1.0"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=d7b9885842f0e0c03e2c5984502f0ca92515f2ea#d7b9885842f0e0c03e2c5984502f0ca92515f2ea"
+dependencies = [
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "chipsmith-route"
 version = "0.1.0"
 source = "git+https://github.com/A-H-Technology/chipsmith?rev=d7b9885842f0e0c03e2c5984502f0ca92515f2ea#d7b9885842f0e0c03e2c5984502f0ca92515f2ea"
@@ -78,6 +91,18 @@ dependencies = [
  "lzma-rust2",
  "postcard",
  "serde",
+]
+
+[[package]]
+name = "chipsmith-synth"
+version = "0.1.0"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=d7b9885842f0e0c03e2c5984502f0ca92515f2ea#d7b9885842f0e0c03e2c5984502f0ca92515f2ea"
+dependencies = [
+ "anyhow",
+ "chipsmith-netlist",
+ "rustc-hash",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
