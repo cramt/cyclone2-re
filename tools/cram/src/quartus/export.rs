@@ -416,7 +416,8 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                         if p.name == 'a' {
                             conns.push(".portawe(1'b0)".to_string());
                         }
-                        conns.push(format!(".port{}datain({}'b{})", p.name, p.bits, "1".repeat(p.bits)));
+                        // A VQM takes no sized constant wider than a bit here.
+                        conns.push(format!(".port{}datain({{{}}})", p.name, vec!["1'b1"; p.bits].join(", ")));
                     }
                     if p.writes {
                         let we = if p.side == Side::A { "WE" } else { "RE" };
