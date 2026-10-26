@@ -408,8 +408,8 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                 let req = chipsmith_cyclone2::pll::Request::from_params(&c.params, used)?;
                 let cfg = req.solve().with_context(|| name.clone())?.config;
                 let w = |s: Option<String>| s.map(|s| vid(&s)).unwrap_or_default();
-                for k in 0..3 {
-                    if !used[k] {
+                for (k, _) in used.iter().enumerate().filter(|(_, u)| !**u) {
+                    {
                         writeln!(v, "wire {};", vid(&format!("{}_nc{k}", atom[name.as_str()])))?;
                     }
                 }
