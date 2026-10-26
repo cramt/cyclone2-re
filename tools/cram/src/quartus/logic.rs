@@ -239,6 +239,9 @@ pub fn from_atoms(atoms: &[Atom], sigs: &[Signal]) -> Result<(Logic, Vec<String>
     let mut ins: HashMap<(i16, i16, i16), u8> = HashMap::new();
     let mut outs: HashMap<(i16, i16, i16), u8> = HashMap::new();
     let mut cores: HashMap<(i16, i16, i16), u8> = HashMap::new();
+    // Clock enables from the core: LOCAL_INTERCONNECT -> BLOCK_INPUT_MUX ->
+    // CLKBUF_ENABLE (z = the clock control's), like the core input.
+    let mut enables: HashMap<(i16, i16, i16), u8> = HashMap::new();
     for s in sigs {
         for (i, r) in s.resources.iter().enumerate() {
             match r.kind.as_str() {
@@ -248,6 +251,14 @@ pub fn from_atoms(atoms: &[Atom], sigs: &[Signal]) -> Result<(Logic, Vec<String>
                     if let Some((j, _)) = up(s.parents[i]).filter(|(_, p)| p.kind == "BLOCK_INPUT_MUX") {
                         if let Some((_, l)) = up(s.parents[j]).filter(|(_, p)| p.kind == "LOCAL_INTERCONNECT") {
                             cores.insert((r.x, r.y, r.z), l.index as u8);
+                        }
+                    }
+                }
+                "CLKBUF_ENABLE" => {
+                    let up = |j: Option<usize>| j.map(|j| (j, &s.resources[j]));
+                    if let Some((j, _)) = up(s.parents[i]).filter(|(_, p)| p.kind == "BLOCK_INPUT_MUX") {
+                        if let Some((_, l)) = up(s.parents[j]).filter(|(_, p)| p.kind == "LOCAL_INTERCONNECT") {
+                            enables.insert((r.x, r.y, r.z), l.index as u8);
                         }
                     }
                 }
@@ -265,7 +276,13 @@ pub fn from_atoms(atoms: &[Atom], sigs: &[Signal]) -> Result<(Logic, Vec<String>
         if clkctrl_select_code(input).is_none() {
             unmodelled.push(format!("clock control G{g}: input {input} (select code unknown)"));
         }
-        out.clkctrls.push(ClkCtrl { g, input, core_line: cores.get(k).copied() });
+        let atom = atoms.iter().find(|a| a.kind == "clkctrl" && a.loc == format!("CLKCTRL_G{g}"));
+        let enable_registered = atom.and_then(|a| a.params.get("ena_register_mode")).is_none_or(|m| m.contains("falling"));
+        let enable = enables.get(k).copied();
+        if atom.and_then(|a| a.port("ena")).is_some_and(|e| e != "vcc") && enable.is_none() {
+            unmodelled.push(format!("clock control G{g}: enable not from a LAB line"));
+        }
+        out.clkctrls.push(ClkCtrl { g, input, core_line: cores.get(k).copied(), enable, enable_registered });
     }
     Ok((out, unmodelled))
 }

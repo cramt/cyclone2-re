@@ -48,11 +48,13 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "chipsmith-cyclone2"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=c8dbabda03e10339b3e70252f96576c135a77c45#c8dbabda03e10339b3e70252f96576c135a77c45"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c17dacd7d1d4aa72b2f9e0ded21d40d520900052#c17dacd7d1d4aa72b2f9e0ded21d40d520900052"
 dependencies = [
  "anyhow",
  "chipsmith-jtag",
+ "chipsmith-netlist",
  "chipsmith-route",
+ "chipsmith-synth",
  "lzma-rust2",
  "postcard",
  "rustc-hash",
@@ -63,21 +65,44 @@ dependencies = [
 [[package]]
 name = "chipsmith-jtag"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=c8dbabda03e10339b3e70252f96576c135a77c45#c8dbabda03e10339b3e70252f96576c135a77c45"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c17dacd7d1d4aa72b2f9e0ded21d40d520900052#c17dacd7d1d4aa72b2f9e0ded21d40d520900052"
 dependencies = [
  "anyhow",
  "rusb",
 ]
 
 [[package]]
+name = "chipsmith-netlist"
+version = "0.1.0"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c17dacd7d1d4aa72b2f9e0ded21d40d520900052#c17dacd7d1d4aa72b2f9e0ded21d40d520900052"
+dependencies = [
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "chipsmith-route"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=c8dbabda03e10339b3e70252f96576c135a77c45#c8dbabda03e10339b3e70252f96576c135a77c45"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c17dacd7d1d4aa72b2f9e0ded21d40d520900052#c17dacd7d1d4aa72b2f9e0ded21d40d520900052"
 dependencies = [
  "anyhow",
  "lzma-rust2",
  "postcard",
  "serde",
+]
+
+[[package]]
+name = "chipsmith-synth"
+version = "0.1.0"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c17dacd7d1d4aa72b2f9e0ded21d40d520900052#c17dacd7d1d4aa72b2f9e0ded21d40d520900052"
+dependencies = [
+ "anyhow",
+ "chipsmith-netlist",
+ "rustc-hash",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
