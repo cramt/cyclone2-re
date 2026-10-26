@@ -17,6 +17,12 @@ fn num(a: &Atom, k: &str) -> Result<u32> {
     param(a, k)?.parse().with_context(|| format!("{}: {k}", a.name))
 }
 
+/// A parameter the netlist may leave at its atom default
+/// (eda/sim_lib/cycloneii_atoms.v).
+fn num_or(a: &Atom, k: &str, default: u32) -> Result<u32> {
+    if a.params.contains_key(k) { num(a, k) } else { Ok(default) }
+}
+
 /// A counter's divider from its `<c>_high`, `_low`, `_mode`.
 fn divider(a: &Atom, c: &str) -> Result<Option<Divider>> {
     let mode = param(a, &format!("{c}_mode"))?;
@@ -44,17 +50,21 @@ pub fn from_atoms(atoms: &[Atom], sigs: &[Signal]) -> Result<(Vec<Pll>, Vec<Stri
                 unmodelled.push(format!("{}: {port} in use", a.name));
             }
         }
+        // A counter is in use when an output port names it (`clk<k>_counter`);
+        // altpll leaves the others out, a hand-made atom may name a bypassed
+        // one.
+        let used: Vec<String> = (0..6).filter_map(|k| a.params.get(&format!("clk{k}_counter")).map(|v| v.trim().trim_matches('"').to_string())).collect();
         let mut outputs = [None; 3];
         for (k, o) in outputs.iter_mut().enumerate() {
             let c = format!("c{k}");
-            *o = match divider(a, &c)? {
-                Some(divider) => Some(Output {
-                    divider,
-                    initial: num(a, &format!("{c}_initial"))? as u8,
-                    phase: num(a, &format!("{c}_ph"))? as u8,
-                }),
-                None => None,
-            };
+            if !used.contains(&c) {
+                continue;
+            }
+            *o = Some(Output {
+                divider: divider(a, &c)?,
+                initial: num_or(a, &format!("{c}_initial"), 1)? as u8,
+                phase: num_or(a, &format!("{c}_ph"), 0)? as u8,
+            });
         }
         // The atom gives m as a number; its high/low split is even (or
         // high = low + 1 for an odd m), as in every fuzz design.
@@ -62,7 +72,6 @@ pub fn from_atoms(atoms: &[Atom], sigs: &[Signal]) -> Result<(Vec<Pll>, Vec<Stri
         let m = Divider::new(m.div_ceil(2) as u8, (m / 2) as u8, m % 2 == 1)?;
         let r: f64 = param(a, "loop_filter_r")?.parse()?;
         let n = num(a, "n")? as u8;
-        let period = num(a, "inclk0_input_frequency")?;
         let config = Config {
             n,
             m,
@@ -75,7 +84,6 @@ pub fn from_atoms(atoms: &[Atom], sigs: &[Signal]) -> Result<(Vec<Pll>, Vec<Stri
                 charge_pump: num(a, "charge_pump_current")? as u16,
                 filter_r_tenths: (r * 10.0).round() as u16,
                 filter_c: num(a, "loop_filter_c")? as u16,
-                lock_window: chipsmith_cyclone2::bitstream::pll::lock_window(period * u32::from(n)),
             },
         };
         // The clock pin: CLK_BUFFER (S = its index on the side) ->
