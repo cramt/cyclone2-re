@@ -11,6 +11,7 @@ use chipsmith_cyclone2::bitstream::device::{element_name, Device};
 use chipsmith_cyclone2::bitstream::hard::HardInput;
 use chipsmith_cyclone2::bitstream::io::{IoDb, BLOCK_COL};
 use chipsmith_cyclone2::bitstream::m4k;
+use chipsmith_cyclone2::bitstream::pll::Feedback;
 use chipsmith_cyclone2::bitstream::nextpnr::{flag, lut_mask, perms, pin_at, split_port, Bel, Cell, IoePin, LePin, M4kPin, M4kShape, PortDir, Routed, Wire};
 use chipsmith_cyclone2::pin::{assignment, register_param};
 
@@ -83,6 +84,13 @@ fn resource(dev: &Device, w: Wire, ioe_out_x: impl Fn(u32, u32, u32) -> u32) -> 
         Wire::Ctrl { x, y, k } => Some(format!("LAB_CONTROL_MUX:X{x}Y{y}S0I{k}")),
         Wire::Ioe { x, y, z, pin: IoePin::DataOut } => Some(format!("IO_DATAOUT:X{}Y{y}S{}I0", ioe_out_x(x, y, z), z % 8)),
         Wire::Ioe { x, y, z, pin: IoePin::Oe } => Some(format!("IO_OE_PIN:X{}Y{y}S{}I0", ioe_out_x(x, y, z), z % 8)),
+        Wire::PllIn { x, y, input } => {
+            let kind = match input {
+                chipsmith_cyclone2::bitstream::pll::Control::Areset => "PLL_ARESET_PIN",
+                chipsmith_cyclone2::bitstream::pll::Control::Pfdena => "PLL_PFD_ENA_PIN",
+            };
+            Some(format!("{kind}:X{x}Y{y}S0I0"))
+        }
         Wire::Hard(h) => {
             let (x, y) = h.xy();
             let (kind, z) = match h {
@@ -118,6 +126,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
             Bel::M4k { x, y } => format!("m4k_x{x}_y{y}"),
             Bel::Jtag => "jtag".to_string(),
             Bel::Asmi => "asmi".to_string(),
+            Bel::Pll { x, y } => format!("pll_x{x}_y{y}"),
             Bel::Ioe { .. } => {
                 let p = c.attrs.get("PORT").with_context(|| format!("{name}: no PORT"))?;
                 port_of.insert(name, p.clone());
@@ -144,6 +153,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                 ("CY2_M4K", o) if o.starts_with("DO") => format!("{a}_q{}", &o[2..]),
                 ("CY2_JTAG", o) if HARD_OUTPUTS.contains(&o) => format!("{a}_{}", o.to_lowercase()),
                 ("CY2_ASMI", "DATA0OUT") => format!("{a}_data0out"),
+                ("CY2_PLL", o @ ("CLK0" | "CLK1" | "CLK2" | "LOCKED")) => format!("{a}_{}", o.to_lowercase()),
                 _ => continue,
             };
             driver.insert(id, sig);
@@ -157,7 +167,9 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
     let mut loads: HashMap<u64, Vec<(&str, &str)>> = HashMap::new();
     for (name, c) in &r.cells {
         for (p, &id) in &c.conns {
-            let ram_out = (c.ty == "CY2_M4K" && p.starts_with("DO")) || HARD_OUTPUTS.contains(&p.as_str());
+            let ram_out = (c.ty == "CY2_M4K" && p.starts_with("DO"))
+                || HARD_OUTPUTS.contains(&p.as_str())
+                || (c.ty == "CY2_PLL" && ["CLK0", "CLK1", "CLK2", "LOCKED"].contains(&p.as_str()));
             if !["COMBOUT", "COUT", "REGOUT", "OUTCLK"].contains(&p.as_str()) && !(c.ty == "CY2_IBUF" && p != "INCLK") && !ram_out {
                 loads.entry(id).or_default().push((name.as_str(), p.as_str()));
             }
@@ -389,6 +401,77 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                 }
                 writeln!(qsf, "set_location_assignment M4K_X{x}_Y{y} -to {}", atom[name.as_str()])?;
             }
+            Bel::Pll { .. } => {
+                // The atom with its counters; the fitter derives the loop
+                // settings from them (cyclone2-re README, "PLLs": a1).
+                let used = [0, 1, 2].map(|k| c.conns.contains_key(&format!("CLK{k}")));
+                let req = chipsmith_cyclone2::pll::Request::from_params(&c.params, used)?;
+                let cfg = req.solve().with_context(|| name.clone())?.config;
+                let w = |s: Option<String>| s.map(|s| vid(&s)).unwrap_or_default();
+                for k in 0..3 {
+                    if !used[k] {
+                        writeln!(v, "wire {};", vid(&format!("{}_nc{k}", atom[name.as_str()])))?;
+                    }
+                }
+                writeln!(v, "cycloneii_pll {a}(")?;
+                writeln!(v, "  .inclk({{1'b0, {}}}),", net(c, "INCLK", "1'b0"))?;
+                writeln!(v, "  .areset({}),", net(c, "ARESET", "1'b0"))?;
+                writeln!(v, "  .pfdena({}),", net(c, "PFDENA", "1'b1"))?;
+                // Unused outputs still need a wire in the concatenation.
+                let mut clks = Vec::new();
+                for k in (0..3).rev() {
+                    clks.push(match sig_of(c, &format!("CLK{k}")) {
+                        Some(sig) => vid(&sig),
+                        None => {
+                            let nc = format!("{}_nc{k}", atom[name.as_str()]);
+                            vid(&nc)
+                        }
+                    });
+                }
+                writeln!(v, "  .clk({{{}}}),", clks.join(", "))?;
+                writeln!(v, "  .locked({}));", w(sig_of(c, "LOCKED")))?;
+                let mut p: Vec<(String, String)> = vec![
+                    ("operation_mode".into(), format!("\"{}\"", match cfg.feedback { Feedback::Normal => "normal", Feedback::NoCompensation => "no_compensation" })),
+                    ("inclk0_input_frequency".into(), req.inclk_period_ps.to_string()),
+                    ("m".into(), cfg.m.count().to_string()),
+                    ("n".into(), cfg.n.to_string()),
+                    ("m_initial".into(), cfg.m_initial.to_string()),
+                    ("m_ph".into(), cfg.m_phase.to_string()),
+                    ("vco_post_scale".into(), if cfg.vco_div2 { "2" } else { "1" }.into()),
+                ];
+                for (k, o) in cfg.outputs.iter().enumerate() {
+                    let Some(o) = o else { continue };
+                    let ck = format!("c{k}");
+                    match o.divider {
+                        Some(d) => {
+                            p.push((format!("{ck}_high"), d.high().to_string()));
+                            p.push((format!("{ck}_low"), d.low().to_string()));
+                            p.push((format!("{ck}_mode"), format!("\"{}\"", if d.odd() { "odd" } else { "even" })));
+                        }
+                        None => p.push((format!("{ck}_mode"), "\"bypass\"".into())),
+                    }
+                    p.push((format!("{ck}_initial"), o.initial.to_string()));
+                    p.push((format!("{ck}_ph"), o.phase.to_string()));
+                    let r = req.outputs[k].context("solved output without its request")?;
+                    p.push((format!("clk{k}_counter"), format!("\"{ck}\"")));
+                    p.push((format!("clk{k}_multiply_by"), r.multiply.to_string()));
+                    p.push((format!("clk{k}_divide_by"), r.divide.to_string()));
+                    p.push((format!("clk{k}_phase_shift"), format!("\"{}\"", r.phase_ps)));
+                    p.push((format!("clk{k}_duty_cycle"), r.duty_percent.to_string()));
+                }
+                if cfg.feedback == Feedback::Normal {
+                    let first = cfg.outputs.iter().position(Option::is_some).unwrap_or(0);
+                    p.push(("compensate_clock".into(), format!("\"clk{first}\"")));
+                }
+                for (k, val) in p {
+                    writeln!(v, "defparam {a}.{k} = {val};")?;
+                }
+                let site = chipsmith_cyclone2::bitstream::pll::Site::ALL
+                    .into_iter()
+                    .find(|s| Bel::Pll { x: s.xy().0, y: s.xy().1 } == c.bel)
+                    .context("PLL bel at no PLL site")?;
+                writeln!(qsf, "set_location_assignment {} -to {}", site.name(), atom[name.as_str()])?;
+            }
             Bel::Jtag => {
                 writeln!(v, "cycloneii_jtag {a}(")?;
                 for (_, p, atom_port) in JTAG_PORTS {
@@ -578,6 +661,18 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                         let c = cell_at.get(&Bel::Ioe { x, y, z }).context("output pin cell")?;
                         let port = if pin == IoePin::Oe { "OE" } else { "DATAIN" };
                         dests.entry(d).or_default().push(format!("dest = ( {}, {port} );", atom[*c]));
+                    } else if let Wire::PllIn { x, y, input } = p.dst {
+                        let c = cell_at.get(&Bel::Pll { x, y }).with_context(|| format!("{}: PLL pin without its cell", n.name))?;
+                        dests.entry(d).or_default().push(format!("dest = ( {}, {} );", atom[*c], input.pin()));
+                    } else if let Wire::Node(dn) = p.dst {
+                        // A PLL's clock input is the PLL_CLKIN element itself.
+                        if dev.element_enum(dn) == 329 {
+                            let (x, y) = dev.xy(dn);
+                            let c = cell_at
+                                .get(&Bel::Pll { x: x as u32, y: y as u32 })
+                                .with_context(|| format!("{}: PLL clock input without its cell", n.name))?;
+                            dests.entry(d).or_default().push(format!("dest = ( {}, INCLK[0] );", atom[*c]));
+                        }
                     } else if let Wire::Hard(h) = p.dst {
                         let (bel, port) = h.bel_pin();
                         let b = if bel == "JTAG" { Bel::Jtag } else { Bel::Asmi };

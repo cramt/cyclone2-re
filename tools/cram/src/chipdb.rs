@@ -470,6 +470,37 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
             ("OUTCLK".into(), out, true),
         ]));
     }
+    // The PLLs (chipsmith `bitstream::pll`): bel `PLL` in each PLL's tile.
+    // INCLK is the PLL's clock input element (PLL_CLKIN 0, fed from the
+    // dedicated clock pins of its side through CLKPIN_TO_PLLCLKIN_MUX), CLKk
+    // its counter k's output (PLL_BUFFER k, into the clock controls), LOCKED
+    // the lock output (PLL_LOCKED_PIN) onto the routing; ARESET and PFDENA
+    // sit behind source muxes over the tile's LAB lines.
+    {
+        use chipsmith_cyclone2::bitstream::pll::{Control, Site};
+        for site in Site::ALL {
+            let (x, y) = site.xy();
+            let mut pins = vec![("INCLK".to_string(), alias_g(&mut ltiles, &mut members, (x, y), find(x, y, 329, 0, 0)?), false)];
+            for k in 0..3 {
+                pins.push((format!("CLK{k}"), alias_g(&mut ltiles, &mut members, (x, y), find(x, y, 69, 0, k)?), true));
+            }
+            pins.push(("LOCKED".into(), alias_g(&mut ltiles, &mut members, (x, y), find(x, y, 347, 0, 0)?), true));
+            for c in Control::ALL {
+                let w = format!("PLL.{}", c.pin());
+                let mut srcs = Vec::new();
+                for l in db.pll.control_sources(site, c)? {
+                    srcs.push(alias_g(&mut ltiles, &mut members, (x, y), find(x, y, 276, 0, l as i16)?));
+                }
+                let t = ltiles.entry((x, y)).or_default();
+                t.wire(&w, "PLL_INPUT");
+                for s in srcs {
+                    t.pip(&s, &w);
+                }
+                pins.push((c.pin().to_string(), w, false));
+            }
+            ltiles.entry((x, y)).or_default().bels.push(("PLL".into(), "PLL".into(), 48, pins));
+        }
+    }
     // The JTAG and serial-flash blocks (chipsmith `bitstream::hard`): one bel each, inputs
     // behind source muxes over the tile's local lines, outputs on their
     // routing elements.
