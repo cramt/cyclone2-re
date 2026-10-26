@@ -386,6 +386,14 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
             if !clock {
                 t.wire(&oe, "IOE_INTERNAL");
                 pins.push(("OE".into(), oe.clone(), false));
+                // The I/O registers: the input register's clock and output,
+                // and the clock the output and OE registers share
+                // (chipsmith `bitstream::io`).
+                for (pin, out) in [("INCLK", false), ("OUTCLK", false), ("REGOUT", true)] {
+                    let w = format!("{bel}.{pin}");
+                    t.wire(&w, "IOE_INTERNAL");
+                    pins.push((pin.into(), w, out));
+                }
             }
             t.bels.push((bel.clone(), "IOE".into(), z, pins));
         }
@@ -393,9 +401,28 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
             let g = alias_g(&mut ltiles, &mut members, (px, py), find(px, py, 289, pz as i16, 0)?);
             ltiles.get_mut(&(px, py)).unwrap().pip(&din, &g);
         } else {
+            // The input register reaches the core on the same two
+            // pad-to-core paths as the pad itself (rcf: a registered input
+            // starts at IO_DATAIN).
+            let regout = format!("{bel}.REGOUT");
             for i in 0..2 {
                 let g = alias_g(&mut ltiles, &mut members, (px, py), find(px, py, 301, pz as i16, i)?);
-                ltiles.get_mut(&(px, py)).unwrap().pip(&din, &g);
+                let t = ltiles.get_mut(&(px, py)).unwrap();
+                t.pip(&din, &g);
+                t.pip(&regout, &g);
+            }
+            // I/O register clocks come from a row-clock buffer of the
+            // IOE's tile, a column IOE's from the tile to its right
+            // (observed: every INCLK/OUTCLK route of the reg and oereg fuzz
+            // designs, 2,061 on all sides, ends at BLK_CLK_BUF X+1 on a
+            // column IOE, X on a row IOE).
+            let cx = px + u32::from(p.ioe.block == BLOCK_COL);
+            for b in 0..6 {
+                let Ok(node) = find(cx, py, 560, 0, b) else { continue };
+                let g = alias_g(&mut ltiles, &mut members, (px, py), node);
+                let t = ltiles.get_mut(&(px, py)).unwrap();
+                t.pip(&g, &format!("{bel}.INCLK"));
+                t.pip(&g, &format!("{bel}.OUTCLK"));
             }
             // Column IOEs 0 and 1 take their output and output enable from
             // the local lines of the tile to the right (observed on every

@@ -1060,6 +1060,22 @@ Quartus' open-drain mode (both valid, different bits); clocks must come straight
 (no logic-driven or inverted clocks); no inverted async clear; registers
 power up 0 (an init of 1 costs inverters).
 
+**Pin settings and I/O registers in chipsmith's flow.** The chip database
+gives every user IOE bel three more pins: `INCLK` and `OUTCLK` (the input
+register's clock and the one the output and OE registers share), each fed
+from the six row-clock buffers (`BLK_CLK_BUF`) of the IOE's tile, a column
+IOE's from the tile to its right (every `INCLK`/`OUTCLK` route of the reg
+and oereg fuzz designs, 2,061 of them, ends there), and `REGOUT`, which
+drives the same two `IO_DATAIN` paths as `COMBOUT`. `cram quartus-export`
+passes a routed design's pin settings (`IO_STANDARD`,
+`CURRENT_STRENGTH_NEW`, `WEAK_PULL_UP_RESISTOR`,
+`ENABLE_BUS_HOLD_CIRCUITRY`, as chipsmith writes them on the pin cells),
+its unused-pin mode and its I/O registers (`cycloneii_io` register modes,
+power-up values, `inclk`/`outclk`/`regout` routed in the rcf) on to
+Quartus, and sets every bank's `IOBANK_VCCIO` to 3.3 V as on the DE2:
+without it Quartus takes VCCIO 2.5 V for a bank holding only 2.5-V inputs,
+and nCEO's drive with it. chipsmith's README has the results.
+
 Nothing from Quartus gets redistributed. The repo ships only the derived
 device database (`db/`, our own format) and our own tools.
 
