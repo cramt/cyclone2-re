@@ -59,3 +59,25 @@ endmodule
 (* blackbox *)
 module CY2_ASMI (input DCLKIN, input SCEIN, input SDOIN, output DATA0OUT);
 endmodule
+
+// A PLL (chipsmith's CY2_PLL, its crate::pll): CLKk = f(INCLK) *
+// CLKk_MULTIPLY_BY / CLKk_DIVIDE_BY, as altpll names it. INCLK comes
+// straight from a dedicated clock pin. No simulation model: a black box.
+(* blackbox *)
+module CY2_PLL (input INCLK, input ARESET, input PFDENA, output CLK0, output CLK1, output CLK2,
+                output LOCKED);
+  parameter INCLK0_INPUT_FREQUENCY = 20000;
+  parameter OPERATION_MODE = "NORMAL";
+  parameter CLK0_MULTIPLY_BY = 1;
+  parameter CLK0_DIVIDE_BY = 1;
+  parameter CLK0_PHASE_SHIFT = 0;
+  parameter CLK0_DUTY_CYCLE = 50;
+  parameter CLK1_MULTIPLY_BY = 1;
+  parameter CLK1_DIVIDE_BY = 1;
+  parameter CLK1_PHASE_SHIFT = 0;
+  parameter CLK1_DUTY_CYCLE = 50;
+  parameter CLK2_MULTIPLY_BY = 1;
+  parameter CLK2_DIVIDE_BY = 1;
+  parameter CLK2_PHASE_SHIFT = 0;
+  parameter CLK2_DUTY_CYCLE = 50;
+endmodule

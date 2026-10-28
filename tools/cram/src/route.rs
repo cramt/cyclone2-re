@@ -60,6 +60,17 @@ pub fn element_enum(kind: &str) -> Option<i16> {
         // the block's local lines (multiplier fuzz designs).
         "DSP_BUFFER" => 280,
         "DSP_CONTROL_INPUT" => 374,
+        // Clock controls fed from the core, and PLLs (clock fuzz designs
+        // k1-k4, p1-p16): LAB line -> BLOCK_INPUT_MUX -> CLKBUF_IN 4 or
+        // CLKBUF_ENABLE; clock pin -> CLKPIN_TO_PLLCLKIN_MUX -> PLL_CLKIN;
+        // PLL counter k -> PLL_BUFFER k -> CLKBUF_IN 2/3; lock out
+        // PLL_LOCKED_PIN onto the routing.
+        "BLOCK_INPUT_MUX" => 532,
+        "CLKBUF_ENABLE" => 512,
+        "CLKPIN_TO_PLLCLKIN_MUX" => 520,
+        "PLL_CLKIN" => 329,
+        "PLL_BUFFER" => 69,
+        "PLL_LOCKED_PIN" => 347,
         _ => return None,
     })
 }

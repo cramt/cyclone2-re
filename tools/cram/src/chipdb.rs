@@ -441,6 +441,14 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
             if !clock {
                 t.wire(&oe, "IOE_INTERNAL");
                 pins.push(("OE".into(), oe.clone(), false));
+                // The I/O registers: the input register's clock and output,
+                // and the clock the output and OE registers share
+                // (chipsmith `bitstream::io`).
+                for (pin, out) in [("INCLK", false), ("OUTCLK", false), ("REGOUT", true)] {
+                    let w = format!("{bel}.{pin}");
+                    t.wire(&w, "IOE_INTERNAL");
+                    pins.push((pin.into(), w, out));
+                }
             }
             t.bels.push((bel.clone(), "IOE".into(), z, pins));
         }
@@ -448,9 +456,28 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
             let g = alias_g(&mut ltiles, &mut members, (px, py), find(px, py, 289, pz as i16, 0)?);
             ltiles.get_mut(&(px, py)).unwrap().pip(&din, &g);
         } else {
+            // The input register reaches the core on the same two
+            // pad-to-core paths as the pad itself (rcf: a registered input
+            // starts at IO_DATAIN).
+            let regout = format!("{bel}.REGOUT");
             for i in 0..2 {
                 let g = alias_g(&mut ltiles, &mut members, (px, py), find(px, py, 301, pz as i16, i)?);
-                ltiles.get_mut(&(px, py)).unwrap().pip(&din, &g);
+                let t = ltiles.get_mut(&(px, py)).unwrap();
+                t.pip(&din, &g);
+                t.pip(&regout, &g);
+            }
+            // I/O register clocks come from a row-clock buffer of the
+            // IOE's tile, a column IOE's from the tile to its right
+            // (observed: every INCLK/OUTCLK route of the reg and oereg fuzz
+            // designs, 2,061 on all sides, ends at BLK_CLK_BUF X+1 on a
+            // column IOE, X on a row IOE).
+            let cx = px + u32::from(p.ioe.block == BLOCK_COL);
+            for b in 0..6 {
+                let Ok(node) = find(cx, py, 560, 0, b) else { continue };
+                let g = alias_g(&mut ltiles, &mut members, (px, py), node);
+                let t = ltiles.get_mut(&(px, py)).unwrap();
+                t.pip(&g, &format!("{bel}.INCLK"));
+                t.pip(&g, &format!("{bel}.OUTCLK"));
             }
             // Column IOEs 0 and 1 take their output and output enable from
             // the local lines of the tile to the right (observed on every
@@ -497,6 +524,37 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
             ("INCLK".into(), inclk, false),
             ("OUTCLK".into(), out, true),
         ]));
+    }
+    // The PLLs (chipsmith `bitstream::pll`): bel `PLL` in each PLL's tile.
+    // INCLK is the PLL's clock input element (PLL_CLKIN 0, fed from the
+    // dedicated clock pins of its side through CLKPIN_TO_PLLCLKIN_MUX), CLKk
+    // its counter k's output (PLL_BUFFER k, into the clock controls), LOCKED
+    // the lock output (PLL_LOCKED_PIN) onto the routing; ARESET and PFDENA
+    // sit behind source muxes over the tile's LAB lines.
+    {
+        use chipsmith_cyclone2::bitstream::pll::{Control, Site};
+        for site in Site::ALL {
+            let (x, y) = site.xy();
+            let mut pins = vec![("INCLK".to_string(), alias_g(&mut ltiles, &mut members, (x, y), find(x, y, 329, 0, 0)?), false)];
+            for k in 0..3 {
+                pins.push((format!("CLK{k}"), alias_g(&mut ltiles, &mut members, (x, y), find(x, y, 69, 0, k)?), true));
+            }
+            pins.push(("LOCKED".into(), alias_g(&mut ltiles, &mut members, (x, y), find(x, y, 347, 0, 0)?), true));
+            for c in Control::ALL {
+                let w = format!("PLL.{}", c.pin());
+                let mut srcs = Vec::new();
+                for l in db.pll.control_sources(site, c)? {
+                    srcs.push(alias_g(&mut ltiles, &mut members, (x, y), find(x, y, 276, 0, l as i16)?));
+                }
+                let t = ltiles.entry((x, y)).or_default();
+                t.wire(&w, "PLL_INPUT");
+                for s in srcs {
+                    t.pip(&s, &w);
+                }
+                pins.push((c.pin().to_string(), w, false));
+            }
+            ltiles.entry((x, y)).or_default().bels.push(("PLL".into(), "PLL".into(), 48, pins));
+        }
     }
     // The JTAG and serial-flash blocks (chipsmith `bitstream::hard`): one bel each, inputs
     // behind source muxes over the tile's local lines, outputs on their
