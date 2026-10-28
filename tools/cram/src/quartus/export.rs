@@ -12,7 +12,9 @@ use chipsmith_cyclone2::bitstream::hard::HardInput;
 use chipsmith_cyclone2::bitstream::io::{IoDb, BLOCK_COL};
 use chipsmith_cyclone2::bitstream::m4k;
 use chipsmith_cyclone2::bitstream::pll::Feedback;
-use chipsmith_cyclone2::bitstream::nextpnr::{flag, lut_mask, perms, pin_at, split_port, Bel, Cell, IoePin, LePin, M4kPin, M4kShape, PortDir, Routed, Wire};
+use chipsmith_cyclone2::bitstream::nextpnr::{flag, lut_mask, mult_shape, perms, pin_at, split_port, Bel, Cell, IoePin, LePin, M4kPin, M4kShape, PortDir, Routed, Wire};
+use chipsmith_cyclone2::bitstream::mult::X as MULT_X;
+use chipsmith_cyclone2::mult::{Operand, Pin as MultPin};
 use chipsmith_cyclone2::pin::{assignment, register_param};
 
 /// Output pins of the CY2_JTAG and CY2_ASMI cells.
@@ -60,6 +62,12 @@ fn atom_ports(shape: &M4kShape) -> Result<HashMap<m4k::Input, String>> {
     Ok(out)
 }
 
+/// A LUT with no inputs and an all-zero mask: the packer's constant 0.
+fn is_gnd(c: &Cell) -> Result<bool> {
+    let inputs = ["DATAA", "DATAB", "DATAC", "DATAD", "CIN"];
+    Ok(c.ty == "LCELL_COMB" && inputs.iter().all(|p| !c.conns.contains_key(*p)) && lut_mask(c)? == 0)
+}
+
 /// Escaped Verilog identifier when needed.
 fn vid(s: &str) -> String {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !s.starts_with(|c: char| c.is_ascii_digit()) {
@@ -75,11 +83,19 @@ fn resource(dev: &Device, w: Wire, ioe_out_x: impl Fn(u32, u32, u32) -> u32) -> 
             let e = &dev.routing.elements[n.0 as usize];
             let t = &dev.routing.templates[e.template as usize];
             // The chip database's names are element_name's; the rcf's are
-            // route::element_enum's (M4K data outputs: M4K_BUFFER).
-            let kind = if t.element_enum == 278 { "M4K_BUFFER".to_string() } else { element_name(t.element_enum) };
+            // route::element_enum's (M4K data outputs: M4K_BUFFER,
+            // multiplier product bits: DSP_BUFFER).
+            let kind = match t.element_enum {
+                278 => "M4K_BUFFER".to_string(),
+                280 => "DSP_BUFFER".to_string(),
+                e => element_name(e),
+            };
             Some(format!("{kind}:X{}Y{}S{}I{}", e.x, e.y, t.z, t.index))
         }
         Wire::M4k { x, y, pin: M4kPin::Ctl(k) } => Some(format!("M4K_LEFT_CONTROL_INPUT:X{x}Y{y}S0I{k}")),
+        // The signs reach the block through control inputs 3 and 4
+        // (0-2 are the clock, enable and clear).
+        Wire::Mult { y, pin: MultPin::Sign(op) } => Some(format!("DSP_CONTROL_INPUT:X{MULT_X}Y{y}S0I{}", 3 + op as u32)),
         Wire::LocalLine { x, y, k } => Some(format!("LOCAL_LINE:X{x}Y{y}S0I{k}")),
         Wire::Ctrl { x, y, k } => Some(format!("LAB_CONTROL_MUX:X{x}Y{y}S0I{k}")),
         Wire::Ioe { x, y, z, pin: IoePin::DataOut } => Some(format!("IO_DATAOUT:X{}Y{y}S{}I0", ioe_out_x(x, y, z), z % 8)),
@@ -120,6 +136,14 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
     let mut port_of: HashMap<&str, String> = HashMap::new();
     for (name, c) in &r.cells {
         let a = match c.bel {
+            // The design's constant 0 (a multiplier's unsigned sign input):
+            // Quartus has one such cell, `~GND`, and keeps a VQM's under
+            // that name where its location assignment puts it; under any
+            // other it is removed and re-created elsewhere.
+            Bel::Lut { .. } if is_gnd(c)? => {
+                ensure!(!atom.values().any(|a| a == "~GND"), "{name}: a second constant-0 cell");
+                "~GND".to_string()
+            }
             Bel::Lut { x, y, k } => format!("lc_x{x}_y{y}_n{}", 2 * k),
             Bel::Ff { x, y, k } => format!("ff_x{x}_y{y}_n{}", 2 * k + 1),
             Bel::ClkCtrl { g } => format!("clkctrl_g{g}"),
@@ -142,6 +166,9 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
         let a = &atom[name.as_str()];
         for (p, &id) in &c.conns {
             let sig = match (c.ty.as_str(), p.as_str()) {
+                // Quartus' own naming: the cell `~GND`, its net
+                // `~GND~combout`, the rcf signal `~GND`.
+                ("LCELL_COMB", "COMBOUT") if a == "~GND" => format!("{a}~combout"),
                 ("LCELL_COMB", "COMBOUT") => format!("{a}_combout"),
                 ("LCELL_COMB", "COUT") => format!("{a}_cout"),
                 ("LCELL_FF", "REGOUT") => format!("{a}_regout"),
@@ -152,6 +179,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                 ("CY2_IBUF" | "CY2_IOBUF", "COMBOUT") => format!("{a}_combout"),
                 ("CY2_IBUF" | "CY2_IOBUF", "REGOUT") => format!("{a}_regout"),
                 ("CY2_M4K", o) if o.starts_with("DO") => format!("{a}_q{}", &o[2..]),
+                ("CY2_MULT", o) if o.starts_with("MULTOUT") => format!("{a}_q{}", &o[7..]),
                 ("CY2_JTAG", o) if HARD_OUTPUTS.contains(&o) => format!("{a}_{}", o.to_lowercase()),
                 ("CY2_ASMI", "DATA0OUT") => format!("{a}_data0out"),
                 ("CY2_PLL", o @ ("CLK0" | "CLK1" | "CLK2" | "LOCKED")) => format!("{a}_{}", o.to_lowercase()),
@@ -169,6 +197,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
     for (name, c) in &r.cells {
         for (p, &id) in &c.conns {
             let ram_out = (c.ty == "CY2_M4K" && p.starts_with("DO"))
+                || (c.ty == "CY2_MULT" && p.starts_with("MULTOUT"))
                 || HARD_OUTPUTS.contains(&p.as_str())
                 || (c.ty == "CY2_PLL" && ["CLK0", "CLK1", "CLK2", "LOCKED"].contains(&p.as_str()));
             if !["COMBOUT", "COUT", "REGOUT", "OUTCLK"].contains(&p.as_str()) && !(c.ty == "CY2_IBUF" && p != "INCLK") && !ram_out {
@@ -307,7 +336,57 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                 writeln!(v, "  .regout({}));", net(c, "REGOUT", ""))?;
                 writeln!(qsf, "set_location_assignment LCFF_X{x}_Y{y}_N{} -to {}", 2 * k + 1, atom[name.as_str()])?;
             }
-            Bel::Mult { .. } => bail!("TODO multiplier export"),
+            Bel::Mult { y } => {
+                // A mac_mult and the mac_out Quartus always pairs it with
+                // (the product leaves the block through the mac_out). The
+                // operands are the logical widths; the fitter puts them on
+                // the top pins of the row, as the packer did (crate::mult).
+                let shape = mult_shape(c).with_context(|| name.clone())?;
+                let (wa, wb) = (shape.width(Operand::A), shape.width(Operand::B));
+                let bus = |op: Operand| -> String {
+                    let v: Vec<String> = (0..shape.width(op)).rev().map(|i| net(c, &shape.pin(op, i).to_string(), "1'b0")).collect();
+                    format!("{{{}}}", v.join(", "))
+                };
+                let sign = |op: Operand| -> String {
+                    if shape.signed[op as usize] {
+                        "1'b1".to_string()
+                    } else {
+                        net(c, &MultPin::Sign(op).to_string(), "1'b0")
+                    }
+                };
+                let p = format!("{a}_p");
+                let out = format!("{a}_out");
+                writeln!(v, "wire [{}:0] {p};", wa + wb - 1)?;
+                let outs: Vec<String> = (0..wa + wb)
+                    .rev()
+                    .map(|k| match sig_of(c, &shape.out(k).to_string()) {
+                        Some(s) => vid(&s),
+                        None => {
+                            let u = format!("{out}_unused_q{k}");
+                            writeln!(v, "wire {};", vid(&u)).unwrap();
+                            vid(&u)
+                        }
+                    })
+                    .collect();
+                writeln!(v, "cycloneii_mac_mult {a}(")?;
+                writeln!(v, "  .signa({}), .signb({}),", sign(Operand::A), sign(Operand::B))?;
+                writeln!(v, "  .dataa({}),", bus(Operand::A))?;
+                writeln!(v, "  .datab({}),", bus(Operand::B))?;
+                writeln!(v, "  .dataout({p}));")?;
+                for (k, val) in [("dataa_width", wa.to_string()), ("datab_width", wb.to_string())] {
+                    writeln!(v, "defparam {a}.{k} = {val};")?;
+                }
+                for k in ["dataa_clock", "datab_clock", "signa_clock", "signb_clock"] {
+                    writeln!(v, "defparam {a}.{k} = \"none\";")?;
+                }
+                writeln!(v, "cycloneii_mac_out {out}(")?;
+                writeln!(v, "  .dataa({p}),")?;
+                writeln!(v, "  .dataout({{{}}}));", outs.join(", "))?;
+                writeln!(v, "defparam {out}.dataa_width = {};", wa + wb)?;
+                writeln!(v, "defparam {out}.output_clock = \"none\";")?;
+                writeln!(qsf, "set_location_assignment DSPMULT_X{MULT_X}_Y{y}_N0 -to {a}")?;
+                writeln!(qsf, "set_location_assignment DSPOUT_X{MULT_X}_Y{y}_N2 -to {out}")?;
+            }
             Bel::M4k { x, y } => {
                 let shape = M4kShape::of(c).with_context(|| name.clone())?;
                 let n = shape.width.addr_bits();
@@ -606,7 +685,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
     for (name, c) in &r.cells {
         // Pins are named after their pad (an I/O atom's `padio`).
         let out = ["COMBOUT", "COUT", "REGOUT", "OUTCLK"].iter().find_map(|p| c.conns.get(*p).and_then(|id| driver.get(id)));
-        let out = if matches!(c.bel, Bel::Ioe { .. }) { None } else { out };
+        let out = if matches!(c.bel, Bel::Ioe { .. }) || atom[name.as_str()] == "~GND" { None } else { out };
         // A RAM atom is named after its lowest output bit (q1).
         let out = out.or_else(|| {
             (0..m4k::COLS).find_map(|k| c.conns.get(&format!("DO{k}")).and_then(|id| driver.get(id))).filter(|_| c.ty == "CY2_M4K")
@@ -616,6 +695,8 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
         // Quartus-fitted design shows).
         let out = out.or_else(|| c.conns.get("DATA0OUT").and_then(|id| driver.get(id)).filter(|_| c.ty == "CY2_ASMI"));
         let out = out.cloned().or_else(|| (c.bel == Bel::Jtag).then(|| format!("{}~TDO", atom[name.as_str()])));
+        // A mac_mult after bit 0 of its product bus (its mac_out's input).
+        let out = out.or_else(|| matches!(c.bel, Bel::Mult { .. }).then(|| format!("{}_p[0]", atom[name.as_str()])));
         rcf_name.insert(name, out.unwrap_or_else(|| atom[name.as_str()].clone()));
     }
     let atom = rcf_name;
@@ -640,6 +721,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
     writeln!(rcf, "section global_data {{\n\trcf_written_by = \"cram quartus-export\";\n\tdevice = EP2C35F672C6;\n}}\n")?;
     for (&id, n) in &r.nets {
         let Some(sig) = driver.get(&id) else { continue };
+        let sig = sig.strip_suffix("~combout").filter(|s| *s == "~GND").unwrap_or(sig);
         // Tree over resources; sinks are (cell, port) dests.
         let mut kids: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut dests: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -675,6 +757,9 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                                 .with_context(|| format!("{}: PLL clock input without its cell", n.name))?;
                             dests.entry(d).or_default().push(format!("dest = ( {}, INCLK[0] );", atom[*c]));
                         }
+                    } else if let Wire::Mult { y, pin: MultPin::Sign(op) } = p.dst {
+                        let c = cell_at.get(&Bel::Mult { y }).with_context(|| format!("{}: multiplier sign without its cell", n.name))?;
+                        dests.entry(d).or_default().push(format!("dest = ( {}, SIGN{} );", atom[*c], if op == Operand::A { "A" } else { "B" }));
                     } else if let Wire::Hard(h) = p.dst {
                         let (bel, port) = h.bel_pin();
                         let b = if bel == "JTAG" { Bel::Jtag } else { Bel::Asmi };
@@ -741,6 +826,17 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                                 M4kPin::Ctl(_) => bail!("{}: M4K control input as a sink", n.name),
                             };
                             format!("dest = ( {}, {port} );", atom[*c])
+                        }
+                        Wire::Mult { y, pin: pin @ (MultPin::A(_) | MultPin::B(_)) } => {
+                            let c = cell_at.get(&Bel::Mult { y }).context("multiplier at its pin")?;
+                            let shape = mult_shape(&r.cells[*c])?;
+                            let (op, k) = match pin {
+                                MultPin::A(k) => (Operand::A, k),
+                                MultPin::B(k) => (Operand::B, k),
+                                _ => unreachable!(),
+                            };
+                            let i = (k as usize).checked_sub(shape.pad(op)).with_context(|| format!("{}: {pin} is an unused pin", n.name))?;
+                            format!("dest = ( {}, DATA{}[{i}] );", atom[*c], if op == Operand::A { "A" } else { "B" })
                         }
                         Wire::Ioe { x, y, z, pin: pin @ (IoePin::InClk | IoePin::OutClk) } => {
                             let c = cell_at.get(&Bel::Ioe { x, y, z }).context("pin cell at its clock")?;
