@@ -1096,11 +1096,39 @@ every load. See [JTAG configuration](#jtag-configuration-phase-7).
 
 A memory with synchronous reads goes yosys → `CY2_M4K` → an M4K bel →
 `m4k.rs`'s typed `M4k` → bits, and to Quartus as a `cycloneii_ram_block`
-atom. The subset: single port ×1-×18 (read-during-write returns the new
-data, the block's flow-through mode), simple dual port ×1-×36 on one clock
-with the same width on both ports, ROMs (initial contents on any of them; a
-×36 ROM is Quartus' "rom" atom, which it builds on port B), logical ×8, ×16
-and ×32 as physical ×9, ×18 and ×36.
+atom. The yosys flow's subset: single port ×1-×18 (read-during-write
+returns the new data, the block's flow-through mode), simple dual port
+×1-×36 on one clock with the same width on both ports, ROMs (initial
+contents on any of them; a ×36 ROM is Quartus' "rom" atom, which it
+builds on port B), logical ×8, ×16 and ×32 as physical ×9, ×18 and ×36.
+
+chipsmith's own synthesis (its README, "M4K RAM blocks") builds every mode
+above too: byte enables, clock enables, output registers and their clears,
+true dual port, mixed widths, two clocks, memories over several blocks and
+shallower than one. `cram quartus-export` writes each from chipsmith's
+`m4k::Shape` **[obs: 8 chipsmith examples and 16 random designs,
+byte-identical, chipsmith README]**:
+
+- operation mode `single_port`, `rom`, `dual_port` or `bidir_dual_port`;
+  clocks, clock enables and clears on `clk0/1`, `ena0/1`, `clr0/1`; output
+  registers as `port_*_data_out_clock`/`_clear`; a port B clock as
+  `port_b_address_clock`, `_read_enable_write_enable_clock`,
+  `_data_in_clock`.
+- Byte enables: Quartus puts a VQM atom's data bit *k* in column *k*
+  whatever `port_a_byte_size` says, so an atom whose bytes sit eight per
+  nine columns is written at its physical width (×18, ×36), byte size 9,
+  the ninth columns tied off. Quartus' own byte-enabled ×16 puts bit 8 in
+  column 9 (fuzz s16b, sublocations), the same bits.
+- Two clocks: Quartus 13.0 rejects a `dual_port` atom on two clocks
+  (error 15684, Cyclone II errata). Quartus' own two-clock simple dual
+  port (fuzz d8k) is a `bidir_dual_port` reading on port A (clock 0) and
+  writing on port B (clock 1), port A's write enable and data in tied
+  off; chipsmith builds it so, and a true dual port's port that never
+  writes keeps `portawe`/`port*datain` tied (errors 14091, 14107).
+- Mixed widths: atom bit *k* of the wider port sits in narrow word *k* /
+  narrow width, column *k* mod narrow width (no `data_interleave_*`
+  parameters needed for a VQM atom).
+- Read data of a true dual port's port B leaves on `M4K_BUFFER` 18-35.
 
 - **yosys** (`synth/m4k.txt`, a `memory_libmap` library; `synth/m4k_map.v`).
   libmap's address bus is the block's 12 physical pins, MSB-aligned, and its
@@ -1149,10 +1177,9 @@ names differ), and it rules out the
   constant on a used address pin rather than guess where the contents go.
 
 Gaps (this repo's nextpnr flow; chipsmith's own flow has clocks from
-logic and PLLs, and the chip database their pips and `PLL` bels): no timing model in nextpnr; M4K only as above (no byte enables,
-clock enables, output registers, clears, two clocks, true dual port,
-mixed widths, packed ×36 single port, memories shallower than their
-block); no multipliers or PLLs; I/O is
+logic and PLLs, and the chip database their pips and `PLL` bels; it
+also has every M4K mode above but the packed ×36 single port): no timing
+model in nextpnr; M4K only in the yosys flow's subset; no multipliers or PLLs; I/O is
 3.3-V LVTTL inputs, outputs, tri-state outputs and bidirs only (no I/O
 registers, no other standards, drive strengths, pull-ups or bus hold; the
 cram model has all of these, the yosys/nextpnr side doesn't); an open
