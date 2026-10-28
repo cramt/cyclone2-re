@@ -115,6 +115,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
             Bel::Ff { x, y, k } => format!("ff_x{x}_y{y}_n{}", 2 * k + 1),
             Bel::ClkCtrl { g } => format!("clkctrl_g{g}"),
             Bel::M4k { x, y } => format!("m4k_x{x}_y{y}"),
+            Bel::Mult { y } => format!("mult_y{y}"),
             Bel::Jtag => "jtag".to_string(),
             Bel::Asmi => "asmi".to_string(),
             Bel::Ioe { .. } => {
@@ -281,6 +282,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                 writeln!(v, "  .regout({}));", net(c, "REGOUT", ""))?;
                 writeln!(qsf, "set_location_assignment LCFF_X{x}_Y{y}_N{} -to {}", 2 * k + 1, atom[name.as_str()])?;
             }
+            Bel::Mult { .. } => bail!("TODO multiplier export"),
             Bel::M4k { x, y } => {
                 let shape = M4kShape::of(c).with_context(|| name.clone())?;
                 let n = shape.width.addr_bits();

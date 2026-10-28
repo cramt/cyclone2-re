@@ -27,6 +27,8 @@ use chipsmith_cyclone2::bitstream::asmdb::arch;
 use chipsmith_cyclone2::bitstream::device::{element_name, ROUTER_ID_BIT};
 use chipsmith_cyclone2::bitstream::io::{BLOCK_CLK_N, BLOCK_CLK_P, BLOCK_COL};
 use chipsmith_cyclone2::bitstream::m4k::{self, CONTROL_PINS as M4K_CONTROL_PINS};
+use chipsmith_cyclone2::bitstream::mult::{self as bmult, arch as mult_arch};
+use chipsmith_cyclone2::mult::{Operand, Pin as MultPin};
 use chipsmith_cyclone2::bitstream::phys::Db;
 
 /// The JTAG block's outputs into the core: (rcf resource kind, atom port,
@@ -272,6 +274,48 @@ fn m4k_tile(db: &Db) -> Result<TileType> {
     Ok(t)
 }
 
+/// The source mux (arch type, group) behind a multiplier input pin.
+fn mult_mux(pin: MultPin) -> (i32, i32) {
+    match pin {
+        MultPin::A(k) => (mult_arch::MAC_ROW_DATA_INPUT, k as i32),
+        MultPin::B(k) => (mult_arch::MAC_ROW_DATA_INPUT, (bmult::DATA / 2) as i32 + k as i32),
+        MultPin::Sign(Operand::A) => (mult_arch::MAC_PIA_TO_SIGN, 0),
+        MultPin::Sign(Operand::B) => (mult_arch::MAC_PIA_TO_SIGN, 1),
+        MultPin::Out(_) => unreachable!("outputs have no mux"),
+    }
+}
+
+/// The shared multiplier tile type: one bel `MULT` (type `MULT`) whose data
+/// and sign inputs sit behind the block's source muxes over its 46 LAB
+/// lines (`LI<l>`), and whose outputs are the DSP_BUFFER elements (`DB<k>`,
+/// product bit k). The open flow uses no registers, so the clock, enable and
+/// clear inputs aren't in it.
+fn mult_tile(db: &Db) -> Result<TileType> {
+    let mut t = TileType::default();
+    for l in 0..bmult::LINES {
+        t.wire(&format!("LI{l}"), "LOCAL_INTERCONNECT");
+    }
+    for k in 0..bmult::DATA {
+        t.wire(&format!("DB{k}"), "DSP_BUFFER");
+    }
+    let mut pins = Vec::new();
+    for pin in MultPin::all() {
+        if let MultPin::Out(k) = pin {
+            pins.push((pin.to_string(), format!("DB{k}"), true));
+            continue;
+        }
+        let w = format!("MULT.{pin}");
+        t.wire(&w, "MULT_INPUT");
+        let (at, grp) = mult_mux(pin);
+        for l in db.mult.sources(at, grp)? {
+            t.pip(&format!("LI{}", l.index()), &w);
+        }
+        pins.push((pin.to_string(), w, false));
+    }
+    t.bels.push(("MULT".into(), "MULT".into(), 0, pins));
+    Ok(t)
+}
+
 pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
     let dev = &db.dev;
     let r = &dev.routing;
@@ -356,6 +400,17 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
         }
         for k in 0..M4K_OUTPUTS {
             alias(find(x, y, 278, 0, k as i16)?, format!("MB{k}"));
+        }
+    }
+    let mult_rows = db.mult.rows();
+    let mult_set: BTreeSet<(u32, u32)> = mult_rows.iter().map(|&y| (bmult::X, y)).collect();
+    for &(x, y) in &mult_set {
+        let mut alias = |node: usize, name: String| members[node].push((2 * x + 1, y, name));
+        for l in 0..bmult::LINES {
+            alias(find(x, y, 276, 0, l as i16)?, format!("LI{l}"));
+        }
+        for k in 0..bmult::DATA {
+            alias(find(x, y, 280, 0, k as i16)?, format!("DB{k}"));
         }
     }
     let mut ltiles: BTreeMap<(u32, u32), TileType> = BTreeMap::new();
@@ -483,6 +538,7 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
     for xy in ltiles.keys() {
         ensure!(!lab_set.contains(xy), "LAB tile X{} Y{} also holds I/O or clock control", xy.0, xy.1);
         ensure!(!m4k_set.contains(xy), "M4K tile X{} Y{} also holds I/O or clock control", xy.0, xy.1);
+        ensure!(!mult_set.contains(xy), "multiplier tile X{} Y{} also holds I/O or clock control", xy.0, xy.1);
     }
 
     // Write.
@@ -490,6 +546,7 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
     TileType::default().write("NULL", w)?;
     lab_tile(db)?.write("LAB", w)?;
     m4k_tile(db)?.write("M4K", w)?;
+    mult_tile(db)?.write("MULT", w)?;
     for ((x, y), t) in &rtiles {
         t.write(&format!("R{x}_{y}"), w)?;
     }
@@ -505,6 +562,8 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
                 Some("LAB".into())
             } else if m4k_set.contains(&(x, y)) {
                 Some("M4K".into())
+            } else if mult_set.contains(&(x, y)) {
+                Some("MULT".into())
             } else {
                 ltiles.contains_key(&(x, y)).then(|| format!("L{x}_{y}"))
             };
