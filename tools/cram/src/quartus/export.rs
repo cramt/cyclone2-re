@@ -4,7 +4,7 @@
 //! (`cram quartus-export`, tools/validate.sh).
 
 use anyhow::{bail, ensure, Context, Result};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use chipsmith_cyclone2::bitstream::device::{element_name, Device};
@@ -317,6 +317,38 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
             feeder.insert(name.as_str(), (src, m != buf));
         }
     }
+    // An inverting feeder from a register or a pin (what a register
+    // powering up 1 turns a plain feed into) can't be pushed into a LUT:
+    // quartus_map makes it an inverted copy of the source, `<src>~_wirecell`
+    // (one per source), and the fitter places it in any free LE and gives
+    // the register a `~feeder` from it (fir, 2026-10-29: 100 of these, every
+    // route into them dropped from the rcf). Placed in the feeder's own LE
+    // it is the LE's LUT feeding its register, as chipsmith built it. Only
+    // for a source with one such feeder: Quartus makes one copy whatever
+    // the number of loads.
+    // Sources seen to get one: LE registers (fir's coefficients) and input
+    // pins (fir's `SW`). A LUT source takes the inversion into its mask.
+    let reg_out: HashSet<u64> = r
+        .cells
+        .values()
+        .filter_map(|c| match (c.bel, c.ty.as_str()) {
+            (Bel::Ff { .. }, _) => c.conns.get("REGOUT").copied(),
+            (_, "CY2_IBUF" | "CY2_IOBUF") => c.conns.get("COMBOUT").copied(),
+            _ => None,
+        })
+        .collect();
+    let mut inv_feeds: HashMap<u64, usize> = HashMap::new();
+    for &(src, inv) in feeder.values() {
+        if inv {
+            *inv_feeds.entry(src).or_default() += 1;
+        }
+    }
+    // Feeder LUT cell -> the wirecell Quartus makes of it.
+    let wirecell: HashMap<&str, String> = feeder
+        .iter()
+        .filter(|(_, &(src, inv))| inv && reg_out.contains(&src) && inv_feeds[&src] == 1)
+        .filter_map(|(&lut, &(src, _))| driver.get(&src).map(|s| (lut, format!("{s}~_wirecell"))))
+        .collect();
     // Inverted copies of nets (`assign n_inv = ~n`), which Quartus folds
     // into the load: an output pin's or a LAB control's inversion.
     let mut inverted: BTreeMap<String, String> = BTreeMap::new();
@@ -385,7 +417,11 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
     for (name, c) in &r.cells {
         let a = vid(&atom[name.as_str()]);
         match c.bel {
-            Bel::Lut { .. } if feeder.contains_key(name.as_str()) => {}
+            Bel::Lut { x, y, k } if feeder.contains_key(name.as_str()) => {
+                if let Some(w) = wirecell.get(name.as_str()) {
+                    writeln!(qsf, "set_location_assignment LCCOMB_X{x}_Y{y}_N{} -to {w}", 2 * k)?;
+                }
+            }
             Bel::Lut { x, y, k } => {
                 let cin = c.conns.contains_key("CIN");
                 writeln!(v, "cycloneii_lcell_comb {a}(")?;
@@ -960,6 +996,9 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                             ensure!(!lg.is_empty() || sdata_ff.is_some(), "{}: LE input {phys} at X{x}Y{y} LE{k} feeds nothing", n.name);
                             let d: Vec<String> = match lut {
                                 _ if lg.is_empty() => vec![],
+                                Some(c) if wirecell.contains_key(*c) => {
+                                    vec![format!("dest = ( {}, DATAA ), route_port = {phys};", wirecell[*c])]
+                                }
                                 Some(c) if feeder.contains_key(*c) => {
                                     let ff = cell_at.get(&Bel::Ff { x, y, k }).context("feeder's register")?;
                                     vec![format!("dest = ( {}, DATAIN ), route_port = {phys};", atom[*ff])]
