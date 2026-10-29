@@ -881,6 +881,60 @@ register, clock enable 1 on its own) follow the same rules but are
 unverified. The open flow uses a subset: [M4K in the open
 flow](#m4k-in-the-open-flow).
 
+### Embedded multipliers (phase 5)
+
+Every multiplier a design uses is configured from the device DB:
+chipsmith's `bitstream/mult.rs`; `cram`'s `quartus/mult.rs` reads
+Quartus' `mac_mult` and `mac_out` atoms and their rcf routing. Tags as
+in [docs/ddb-format.md](docs/ddb-format.md): **[obs]** observed, **[inf]**
+inferred.
+
+**Where they are (asmdb, [obs]):** 35 blocks, asmdb block type 41, one per
+LAB row in the 27-frame centre column X39 (Quartus `DSPMULT_X39_Y<y>_N<0|1>`
+for the two 9 x 9 rows of a block, `DSPOUT_X39_Y<y>_N<2|3>` for the output
+stages the products leave through). A block is 70 CRAM rows x 27 frames
+based at `lab_row(y)`.
+
+**Inputs and outputs ([obs], `tools/gen_mult.py` designs `f*`, `n*`, `t*`
+in `tools/mult_jobs.txt`; `tools/cram/examples/mult_pins.rs` and
+`mult_attr.rs` found the bits):**
+
+- 36 data inputs, `MAC_ROW_DATA_INPUT` k: operand A bit k for k < 18,
+  operand B bit k - 18 above; in nine-bit mode
+  (`MAC_USE_NINE_BIT_DATA_WIDTH_PER_ROW`) row 0 takes bits 0-8 of each
+  operand and row 1 bits 9-17. Each is a two-level source mux over the
+  block's 46 LAB lines (`LOCAL_INTERCONNECT` at X39, like an M4K's). The
+  fitter puts a narrow operand on the top pins of its row (a 9 x 7 has B
+  on pins 2-8) and the product comes out shifted by the unused pins.
+- An input no line drives reads 1; `MAC_ROW_DATA_INVERT` k makes it the 0
+  a narrow operand's unused low pins need. The two sign inputs (`SIGNA`,
+  `SIGNB`, through `DSP_CONTROL_INPUT` 3 and 4 from a line; `MAC_PIA_TO_SIGN`)
+  also read 1 (signed) unconnected, so an unsigned operand gets a line
+  driven by Quartus' `~GND` cell.
+- The 36 product bits leave on `DSP_BUFFER` 0-35 (element 280), plain
+  routing-graph nodes like `M4K_BUFFER`.
+
+**Registers ([obs], designs `fa fb fo fe fck fcl fsa fsb n01r t1`):** one
+per row and operand (`MAC_ROW_IREG_LOWER_DATA`/`_UPPER_DATA`; an 18-bit
+operand sets both rows), one per sign (`MAC_IREG_SIGN`), one per row on the
+product (`MAC_ROW_OREG_UPPER_DATA`). They share one clock, enable and
+clear: the clock and clear each come through a one-hot fast mux
+(`MAC_CLK_FAST_MUX`, `MAC_CLR_FAST_MUX`: bit 0 the block's control input
+0 / 2 fed from a line via `MAC_PIA_TO_CLK` / `_CLR`, bit 1 + g row clock
+`BLK_CLK_BUF` g); the enable only from a line (`MAC_PIA_TO_CE`, control
+input 1). `MAC_CLR_INVERT` is set for the active-high clear Quartus
+builds.
+
+`cram check` on nine registered, dynamically signed and two-row designs
+(`fa fb fo fe fck fcl n01r t1 fsd`) finds no residual bits (2026-10-29).
+
+**In the open flow:** chipsmith's `CY2_MULT`, one multiplier per block
+(nine-bit mode when both operands fit nine bits), operand and product
+registers; `cram quartus-export` writes the `mac_mult` + `mac_out` pair
+with the registers' clocks, keeps the design's one constant-0 LE under
+Quartus' name `~GND`, and Quartus assembles chipsmith's placement and
+routing byte-identically (chipsmith's README has the list).
+
 ### Open flow (phase 6)
 
 Verilog → yosys → nextpnr → `cram pack` → `top.rbf`, with no Quartus
@@ -1216,8 +1270,8 @@ device database (`db/`, our own format) and our own tools.
 | 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | LAB grid and its CRAM frame/row placement observed; IOE coordinates and their CRAM/CFF bits from pad/pkg + asmdb; the 105 M4Ks (X13/X26/X52, one per LAB row, 70 rows × 166 frames) and 35 multipliers (X39) placed from the asmdb block lists |
 | 3 | Logic: LUT truth tables, FF modes, carry chains | asmdb decoded. LUT, LE inputs A-D, carry, registers, packing, LAB clocks/CE/aclr/sclr/sload placed by the asmdb, setting values fit on 9 fuzz designs. All 8 held-out counters and all 9 LE fuzz designs byte-identical with the I/O model |
 | 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clocks (pin → clkctrl → GCLK → RCLK → LAB) modelled: graph plus asmdb clkctrl select, checked on 2 clock pins and 4 global nets. Clock controls fed from the core (a register, the JTAG block's TCK) and their enables: 8 of 8 clock fuzz designs byte-identical |
-| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers incl. OE register and power-up high, output enable incl. inversion, tri-state, bidir and open drain, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical (24/24 held-out output-enable designs). Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K: done for Quartus designs (`cram roundtrip`): single port, simple and true dual port, ROM, ×1-×36 and mixed widths, packed ×32/×36 single ports, output registers, clock enables, clears, byte enables, initial contents, RAMs over several blocks; content layout, input pins and settings from the asmdb, values fit on 28 designs; 52 of 53 held-out designs byte-identical (the miss is an LE clock choice). In the open flow: single port ×1-×18, simple dual port ×1-×36 on one clock, ROMs, initial contents (`examples/ram`, `examples/ram_widths` byte-identical). PLLs: counters, phase, duty cycle, n 1-4, m 4-32, the VCO post-scale, loop and lock settings, both feedback modes, lock output, areset and pfdena from the core, inputs from the clock pins of PLL_1-3; 58 of 59 PLL and clock fuzz designs byte-identical (not the external clock output). In chipsmith's flow (`CY2_PLL`) byte-identical with Quartus. Multipliers not started |
-| 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins including tri-state and bidirectional ones: `just open-build`, no Quartus involved (packing, base image and chip database from the committed `db/`, no Quartus files at use time). M4K RAM (single port, simple dual port, ROM, ×1-×36). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx, picorv32, bidir, ram and ram_widths. No timing model, no multiplier/PLL, no registered I/O, M4K without byte/clock enables, output registers, true dual port |
+| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers incl. OE register and power-up high, output enable incl. inversion, tri-state, bidir and open drain, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical (24/24 held-out output-enable designs). Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K: done for Quartus designs (`cram roundtrip`): single port, simple and true dual port, ROM, ×1-×36 and mixed widths, packed ×32/×36 single ports, output registers, clock enables, clears, byte enables, initial contents, RAMs over several blocks; content layout, input pins and settings from the asmdb, values fit on 28 designs; 52 of 53 held-out designs byte-identical (the miss is an LE clock choice). In the open flow: single port ×1-×18, simple dual port ×1-×36 on one clock, ROMs, initial contents (`examples/ram`, `examples/ram_widths` byte-identical). PLLs: counters, phase, duty cycle, n 1-4, m 4-32, the VCO post-scale, loop and lock settings, both feedback modes, lock output, areset and pfdena from the core, inputs from the clock pins of PLL_1-3; 58 of 59 PLL and clock fuzz designs byte-identical (not the external clock output). In chipsmith's flow (`CY2_PLL`) byte-identical with Quartus. Multipliers: 35 blocks placed from the asmdb, data and sign inputs, nine-bit mode, input/output registers with their clock, enable and clear (26 fuzz designs, `tools/mult_jobs.txt`); zero residual bits on the nine registered designs checked. Not covered: sign registers in the open flow, two products in one block |
+| 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins including tri-state and bidirectional ones: `just open-build`, no Quartus involved (packing, base image and chip database from the committed `db/`, no Quartus files at use time). M4K RAM (single port, simple dual port, ROM, ×1-×36). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx, picorv32, bidir, ram and ram_widths. Multipliers (chipsmith `CY2_MULT`, with registers), PLLs and registered I/O came with chipsmith's flow (its README) |
 | 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | done: `cram svf` writes the JTAG stream (RBF minus its passive-serial preamble) with a CONF_DONE check; openFPGALoader plays it. Open-built designs run on a DE2. EPCS: the JTAG and serial-flash blocks are modelled (Quartus designs byte-identical, chipsmith's flash loader validates byte-identical) and chipsmith programs the EPCS16 through them |
 
 ## Prior art

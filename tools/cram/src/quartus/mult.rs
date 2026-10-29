@@ -133,10 +133,14 @@ fn block(y: u32, rows: &[(u32, &Atom)], outs: &[&Atom], sigs: &[Signal]) -> Resu
             let _ = k;
             for (i, n) in nets.iter().enumerate() {
                 let pin = DataPin::new((base + row as usize * 9 + row_bits - w + i) as u32)?;
+                // `!net`: an inverter quartus_map folded into the pin.
                 let d = match n.as_str() {
                     "vcc" => continue,
                     "gnd" => DataIn::Zero,
-                    _ => DataIn::Line(line(sigs, &cell, &format!("{}[{i}]", port.to_uppercase()), y)?),
+                    n => DataIn::Line {
+                        line: line(sigs, &cell, &format!("{}[{i}]", port.to_uppercase()), y)?,
+                        inverted: n.starts_with('!'),
+                    },
                 };
                 ensure!(m.data.insert(pin, d).is_none(), "{}: data input {pin:?} twice", a.name);
             }

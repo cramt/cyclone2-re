@@ -274,29 +274,43 @@ fn m4k_tile(db: &Db) -> Result<TileType> {
     Ok(t)
 }
 
-/// The source mux (arch type, group) behind a multiplier input pin.
+/// The source mux (arch type, group) behind a multiplier input pin fed
+/// straight from a LAB line; the clock and clear have a fast mux instead.
 fn mult_mux(pin: MultPin) -> (i32, i32) {
     match pin {
         MultPin::A(k) => (mult_arch::MAC_ROW_DATA_INPUT, k as i32),
         MultPin::B(k) => (mult_arch::MAC_ROW_DATA_INPUT, (bmult::DATA / 2) as i32 + k as i32),
         MultPin::Sign(Operand::A) => (mult_arch::MAC_PIA_TO_SIGN, 0),
         MultPin::Sign(Operand::B) => (mult_arch::MAC_PIA_TO_SIGN, 1),
+        MultPin::Ena => (mult_arch::MAC_PIA_TO_CE, 0),
+        MultPin::Clk | MultPin::Aclr => unreachable!("behind a fast mux"),
         MultPin::Out(_) => unreachable!("outputs have no mux"),
     }
 }
 
-/// The shared multiplier tile type: one bel `MULT` (type `MULT`) whose data
-/// and sign inputs sit behind the block's source muxes over its 46 LAB
-/// lines (`LI<l>`), and whose outputs are the DSP_BUFFER elements (`DB<k>`,
-/// product bit k). The open flow uses no registers, so the clock, enable and
-/// clear inputs aren't in it.
+/// The shared multiplier tile type: one bel `MULT` (type `MULT`) whose data,
+/// sign and enable inputs sit behind the block's source muxes over its 46
+/// LAB lines (`LI<l>`), whose clock and clear take a control input
+/// (`MULT.CTL0`, `MULT.CTL2`, each fed from a line) or a row clock
+/// (`BCB<b>`) through their fast mux (bitstream `mult.rs`), and whose
+/// outputs are the DSP_BUFFER elements (`DB<k>`, product bit k).
 fn mult_tile(db: &Db) -> Result<TileType> {
     let mut t = TileType::default();
     for l in 0..bmult::LINES {
         t.wire(&format!("LI{l}"), "LOCAL_INTERCONNECT");
     }
+    for b in 0..6 {
+        t.wire(&format!("BCB{b}"), "BLK_CLK_BUF");
+    }
     for k in 0..bmult::DATA {
         t.wire(&format!("DB{k}"), "DSP_BUFFER");
+    }
+    for (k, at) in [(0, mult_arch::MAC_PIA_TO_CLK), (2, mult_arch::MAC_PIA_TO_CLR)] {
+        let w = format!("MULT.CTL{k}");
+        t.wire(&w, "MULT_CONTROL");
+        for l in db.mult.sources(at, 0)? {
+            t.pip(&format!("LI{}", l.index()), &w);
+        }
     }
     let mut pins = Vec::new();
     for pin in MultPin::all() {
@@ -306,9 +320,20 @@ fn mult_tile(db: &Db) -> Result<TileType> {
         }
         let w = format!("MULT.{pin}");
         t.wire(&w, "MULT_INPUT");
-        let (at, grp) = mult_mux(pin);
-        for l in db.mult.sources(at, grp)? {
-            t.pip(&format!("LI{}", l.index()), &w);
+        match pin {
+            MultPin::Clk | MultPin::Aclr => {
+                let k = if pin == MultPin::Clk { 0 } else { 2 };
+                t.pip(&format!("MULT.CTL{k}"), &w);
+                for b in 0..6 {
+                    t.pip(&format!("BCB{b}"), &w);
+                }
+            }
+            _ => {
+                let (at, grp) = mult_mux(pin);
+                for l in db.mult.sources(at, grp)? {
+                    t.pip(&format!("LI{}", l.index()), &w);
+                }
+            }
         }
         pins.push((pin.to_string(), w, false));
     }
@@ -408,6 +433,9 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
         let mut alias = |node: usize, name: String| members[node].push((2 * x + 1, y, name));
         for l in 0..bmult::LINES {
             alias(find(x, y, 276, 0, l as i16)?, format!("LI{l}"));
+        }
+        for b in 0..6 {
+            alias(find(x, y, 560, 0, b)?, format!("BCB{b}"));
         }
         for k in 0..bmult::DATA {
             alias(find(x, y, 280, 0, k as i16)?, format!("DB{k}"));
