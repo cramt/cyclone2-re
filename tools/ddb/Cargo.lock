@@ -48,7 +48,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "chipsmith-cyclone2"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=816ddd55dff42c01d063157e3e49b7ad46854882#816ddd55dff42c01d063157e3e49b7ad46854882"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=005575ea82a718a5bbf21e24c917db7679a1326c#005575ea82a718a5bbf21e24c917db7679a1326c"
 dependencies = [
  "anyhow",
  "chipsmith-jtag",
@@ -65,7 +65,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-jtag"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=816ddd55dff42c01d063157e3e49b7ad46854882#816ddd55dff42c01d063157e3e49b7ad46854882"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=005575ea82a718a5bbf21e24c917db7679a1326c#005575ea82a718a5bbf21e24c917db7679a1326c"
 dependencies = [
  "anyhow",
  "rusb",
@@ -74,7 +74,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-netlist"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=816ddd55dff42c01d063157e3e49b7ad46854882#816ddd55dff42c01d063157e3e49b7ad46854882"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=005575ea82a718a5bbf21e24c917db7679a1326c#005575ea82a718a5bbf21e24c917db7679a1326c"
 dependencies = [
  "rustc-hash",
  "serde",
@@ -85,7 +85,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-route"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=816ddd55dff42c01d063157e3e49b7ad46854882#816ddd55dff42c01d063157e3e49b7ad46854882"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=005575ea82a718a5bbf21e24c917db7679a1326c#005575ea82a718a5bbf21e24c917db7679a1326c"
 dependencies = [
  "anyhow",
  "lzma-rust2",
@@ -96,7 +96,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-synth"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=816ddd55dff42c01d063157e3e49b7ad46854882#816ddd55dff42c01d063157e3e49b7ad46854882"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=005575ea82a718a5bbf21e24c917db7679a1326c#005575ea82a718a5bbf21e24c917db7679a1326c"
 dependencies = [
  "anyhow",
  "chipsmith-netlist",

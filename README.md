@@ -1133,6 +1133,16 @@ too, and blinky, lfsr and uart_tx export the same netlist, rcf and RBF with
 the old and the new cram. uart_tx and picorv32 were not re-run through
 Quartus with the new chip database.
 
+A LUT whose only job is to invert a register's or a pin's output into a
+register (a register powering up 1 fed from another, an inverted pin read
+into a register) is what Quartus calls `<src>~_wirecell`, and quartus_map
+re-creates it under that name wherever it likes unless the VQM already has
+it. The export names it so and places it in the feeder's LE (2026-10-29):
+chipsmith's fir lost 100 rcf routes to such re-placed cells before and none
+since. Over chipsmith's DE2 examples, the 16 random M4K designs and the
+multiplier examples, 41 of 43 are now byte-identical; uart and i2c-master
+differ in 2 and 6 I/O-row bits (chipsmith's README).
+
 Quartus' fitter accepts each placement and routing (all routes preserved,
 no legality errors) and TimeQuest reports positive setup and hold slack.
 Built inside `nix develop` (the packaged nextpnr and its chip

@@ -25,7 +25,7 @@ rustPlatform.buildRustPackage {
     lockFile = ../tools/cram/Cargo.lock;
     # The assembler, from chipsmith (its ADR-0003): a git dependency, so the
     # vendored source needs a hash. Update it with the rev in Cargo.toml.
-    outputHashes."chipsmith-cyclone2-0.1.0" = "sha256-X7324DimimFyIGWnREHdRPYezXheeVPRgKcL6JL8B/I=";
+    outputHashes."chipsmith-cyclone2-0.1.0" = "sha256-B9uo5j7V12Wl+85j9U72/13lQRTAb41AGtFElvL9oTA=";
   };
 
   postInstall = ''

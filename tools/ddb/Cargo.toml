@@ -7,8 +7,7 @@ description = "Reader for Quartus II 13.0 .ddb device database files (Cyclone II
 [dependencies]
 # The types the decoders fill in (the bitstream code reads the same ones from
 # the shipped database, ADR-0003 in chipsmith).
-# Development: the multipliers worktree; switch back to the git rev on merge.
-chipsmith-cyclone2 = { path = "/pool/dev/chipsmith-wt/mult/crates/chipsmith-cyclone2" }
+chipsmith-cyclone2 = { git = "https://github.com/A-H-Technology/chipsmith", rev = "005575ea82a718a5bbf21e24c917db7679a1326c" }
 # Pure-Rust codecs so the crate builds without system liblzma/zlib on NixOS.
 lzma-rs = "0.3"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
