@@ -12,7 +12,8 @@ use chipsmith_cyclone2::bitstream::hard::HardInput;
 use chipsmith_cyclone2::bitstream::io::{IoDb, BLOCK_COL};
 use chipsmith_cyclone2::bitstream::m4k;
 use chipsmith_cyclone2::bitstream::pll::Feedback;
-use chipsmith_cyclone2::bitstream::nextpnr::{flag, lut_mask, mult_shape, perms, pin_at, split_port, Bel, Cell, IoePin, LePin, M4kPin, M4kShape, PortDir, Routed, Wire};
+use chipsmith_cyclone2::m4k::{OutReg, Packing, Ports, Sel, Side, Width};
+use chipsmith_cyclone2::bitstream::nextpnr::{flag, lut_mask, mult_regs, mult_shape, perms, pin_at, split_port, Bel, Cell, IoePin, LePin, M4kPin, M4kShape, PortDir, Routed, Wire};
 use chipsmith_cyclone2::bitstream::mult::X as MULT_X;
 use chipsmith_cyclone2::mult::{Operand, Pin as MultPin};
 use chipsmith_cyclone2::pin::{assignment, register_param};
@@ -38,25 +39,93 @@ fn verilog(d: PortDir) -> &'static str {
     }
 }
 
-/// A read-only x36: Quartus' "rom" atom, which it builds on port B
-/// (fuzz r36), so its port A address enters on port B's pins.
-fn rom36(shape: &M4kShape) -> bool {
-    shape.dual && !shape.writes
+/// One port of a RAM atom: which physical port it is, and what it does.
+struct AtomPort {
+    /// The atom's `a` or `b`.
+    name: char,
+    side: Side,
+    width: Width,
+    /// The atom's data width: the data bits the port carries.
+    bits: usize,
+    writes: bool,
+    out_reg: Option<OutReg>,
+    clock: Sel,
+}
+
+/// How Quartus sees a block: its operation mode and the atom's ports. A
+/// read-only x36 is Quartus' "rom" atom, which it builds on port B (fuzz
+/// r36), so the atom's port A is the block's port B.
+fn atom_shape(shape: &M4kShape) -> (&'static str, Vec<AtomPort>) {
+    let s = shape.shape;
+    let port = |name: char, side: Side, writes: bool| -> AtomPort {
+        let width = s.width(side).expect("a used port");
+        let out_reg = s.read_ports().into_iter().find(|(x, _)| *x == side).and_then(|(_, r)| r.out_reg);
+        // Bytes under byte enables sit in nine-column groups; Quartus puts
+        // a VQM atom's bit k in column k whatever its byte size, so the
+        // atom is the full physical width, the ninth columns unused.
+        let bits = match s.packing() {
+            Packing::Dense => s.data_bits(width),
+            Packing::Bytes => width.bits(),
+        };
+        AtomPort { name, side, width, bits, writes, out_reg, clock: s.input_clock(side) }
+    };
+    match s.ports() {
+        Ports::Single { .. } if shape.writes[0] => ("single_port", vec![port('a', Side::A, true)]),
+        Ports::Single { .. } => ("rom", vec![port('a', Side::A, false)]),
+        Ports::SimpleDual { .. } if shape.writes[0] => {
+            ("dual_port", vec![port('a', Side::A, true), port('b', Side::B, false)])
+        }
+        Ports::SimpleDual { .. } => ("rom", vec![port('a', Side::B, false)]),
+        Ports::TrueDual { .. } => {
+            ("bidir_dual_port", vec![port('a', Side::A, shape.writes[0]), port('b', Side::B, shape.writes[1])])
+        }
+    }
+}
+
+/// Column of an atom port's bit k.
+fn column(shape: &M4kShape, p: &AtomPort, k: usize) -> usize {
+    match shape.shape.packing() {
+        Packing::Dense => shape.shape.column(p.width, k),
+        Packing::Bytes => k,
+    }
+}
+
+/// Linear position of an atom port's word `word`, bit k.
+fn linear(shape: &M4kShape, p: &AtomPort, word: usize, k: usize) -> usize {
+    match shape.shape.packing() {
+        Packing::Dense => shape.shape.linear(p.width, word, k),
+        Packing::Bytes => p.width.linear(word, k),
+    }
+}
+
+/// Data input pin of an atom port's bit k.
+fn data_pin(shape: &M4kShape, p: &AtomPort, k: usize) -> m4k::Input {
+    m4k::Input::Data((column(shape, p, k) + if p.side == Side::B { 18 } else { 0 }) as u8)
+}
+
+/// Read column (`DO<k>`) of an atom port's output bit k.
+fn out_col(shape: &M4kShape, p: &AtomPort, k: usize) -> usize {
+    let tdp = matches!(shape.shape.ports(), Ports::TrueDual { .. });
+    column(shape, p, k) + if tdp && p.side == Side::B { 18 } else { 0 }
 }
 
 /// Quartus atom port (`PORTAADDR[i]`, ...) of each physical input.
 fn atom_ports(shape: &M4kShape) -> Result<HashMap<m4k::Input, String>> {
-    let n = shape.width.addr_bits();
     let mut out = HashMap::new();
-    for i in 0..n {
-        out.insert(m4k::Input::addr(rom36(shape), 12 - n + i)?, format!("PORTAADDR[{i}]"));
-        if shape.dual && shape.writes {
-            out.insert(m4k::Input::addr(true, 12 - n + i)?, format!("PORTBADDR[{i}]"));
+    for p in atom_shape(shape).1 {
+        let n = p.width.addr_bits();
+        let up = p.name.to_ascii_uppercase();
+        for i in 0..n {
+            out.insert(m4k::Input::addr(p.side == Side::B, 12 - n + i)?, format!("PORT{up}ADDR[{i}]"));
         }
-    }
-    if shape.writes {
-        for k in 0..shape.bits {
-            out.insert(m4k::Input::Data(k as u8), format!("PORTADATAIN[{k}]"));
+        if p.writes {
+            for k in 0..p.bits {
+                out.insert(data_pin(shape, &p, k), format!("PORT{up}DATAIN[{k}]"));
+            }
+            for j in 0..p.width.bits().div_ceil(9) {
+                let be = if p.side == Side::B { 2 + j } else { j };
+                out.insert(m4k::Input::ByteEna(be as u8), format!("PORT{up}BYTEENAMASKS[{j}]"));
+            }
         }
     }
     Ok(out)
@@ -389,82 +458,114 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
             }
             Bel::M4k { x, y } => {
                 let shape = M4kShape::of(c).with_context(|| name.clone())?;
-                let n = shape.width.addr_bits();
-                let (w, depth) = (shape.bits, 1u32 << n);
+                let (op, ports) = atom_shape(&shape);
                 let pin = |inp: m4k::Input| net(c, &inp.pin_name(), "1'b0");
-                let addr = |b: bool| -> Result<String> {
-                    let v: Vec<String> = (0..n).rev().map(|i| Ok(pin(m4k::Input::addr(b, 12 - n + i)?))).collect::<Result<_>>()?;
-                    Ok(format!("{{{}}}", v.join(", ")))
-                };
-                let outs: Vec<String> = (0..w)
-                    .rev()
-                    .map(|k| match sig_of(c, &format!("DO{k}")) {
-                        Some(s) => vid(&s),
-                        None => {
-                            let u = format!("{}_unused_q{k}", atom[name.as_str()]);
-                            writeln!(v, "wire {};", vid(&u)).unwrap();
-                            vid(&u)
-                        }
-                    })
-                    .collect();
-                let op = match (shape.dual, shape.writes) {
-                    (false, true) => "single_port",
-                    (true, true) => "dual_port",
-                    (_, false) => "rom",
-                };
-                writeln!(v, "cycloneii_ram_block {a}(")?;
-                writeln!(v, "  .clk0({}),", net(c, "CLK0", "1'b0"))?;
+                let bus = |v: Vec<String>| format!("{{{}}}", v.into_iter().rev().collect::<Vec<_>>().join(", "));
+                let sel = |s: Sel, what: &str| format!("\"{what}{}\"", s as u8);
+                let mut conns: Vec<String> = Vec::new();
+                conns.push(format!(".clk0({})", net(c, "CLK0", "1'b0")));
+                for (pin_name, port) in [("CLK1", "clk1"), ("ENA0", "ena0"), ("ENA1", "ena1"), ("CLR0", "clr0"), ("CLR1", "clr1")] {
+                    if c.conns.contains_key(pin_name) {
+                        conns.push(format!(".{port}({})", net(c, pin_name, "1'b0")));
+                    }
+                }
                 // A dual port must have port B's read enable driven
-                // (error 14091), the other modes must not (14090).
-                if op == "dual_port" {
-                    writeln!(v, "  .portbrewe(1'b1),")?;
+                // (error 14091), the other modes but true dual port must
+                // not (14090).
+                match op {
+                    "dual_port" => conns.push(".portbrewe(1'b1)".to_string()),
+                    "bidir_dual_port" => conns.push(format!(".portbrewe({})", net(c, "RE", "1'b0"))),
+                    _ => {}
                 }
-                writeln!(v, "  .portaaddr({}),", addr(rom36(&shape))?)?;
-                if shape.writes {
-                    writeln!(v, "  .portawe({}),", net(c, "WE", "1'b0"))?;
-                    let d: Vec<String> = (0..w).rev().map(|k| pin(m4k::Input::Data(k as u8))).collect();
-                    writeln!(v, "  .portadatain({{{}}}),", d.join(", "))?;
-                }
-                let out_port = if shape.dual && shape.writes {
-                    writeln!(v, "  .portbaddr({}),", addr(true)?)?;
-                    "portbdataout"
-                } else {
-                    "portadataout"
-                };
-                writeln!(v, "  .{out_port}({{{}}}));", outs.join(", "))?;
-                let mut p: Vec<(String, String)> = vec![
+                let mut params: Vec<(String, String)> = vec![
                     ("operation_mode".into(), format!("\"{op}\"")),
                     ("ram_block_type".into(), "\"M4K\"".into()),
                     ("logical_ram_name".into(), format!("\"{}\"", atom[name.as_str()])),
                     ("init_file_layout".into(), "\"port_a\"".into()),
                 ];
-                let ports: &[char] = if shape.dual && shape.writes { &['a', 'b'] } else { &['a'] };
-                for &pt in ports {
+                for p in &ports {
+                    let n = p.width.addr_bits();
+                    let depth = 1u32 << n;
+                    let ab = p.side == Side::B;
+                    let addr: Vec<String> = (0..n).map(|i| Ok(pin(m4k::Input::addr(ab, 12 - n + i)?))).collect::<Result<_>>()?;
+                    conns.push(format!(".port{}addr({})", p.name, bus(addr)));
+                    // A true dual port's port that never writes still has
+                    // its write enable and data in (error 14091, 14107):
+                    // tied off, as Quartus' own two-clock simple dual port
+                    // has them.
+                    if !p.writes && op == "bidir_dual_port" {
+                        if p.name == 'a' {
+                            conns.push(".portawe(1'b0)".to_string());
+                        }
+                        // A VQM takes no sized constant wider than a bit here.
+                        conns.push(format!(".port{}datain({{{}}})", p.name, vec!["1'b1"; p.bits].join(", ")));
+                    }
+                    if p.writes {
+                        let we = if p.side == Side::A { "WE" } else { "RE" };
+                        if p.name == 'a' {
+                            conns.push(format!(".portawe({})", net(c, we, "1'b0")));
+                        }
+                        let d: Vec<String> = (0..p.bits).map(|k| pin(data_pin(&shape, p, k))).collect();
+                        conns.push(format!(".port{}datain({})", p.name, bus(d)));
+                        let nbe = p.width.bits().div_ceil(9);
+                        let be_pins: Vec<m4k::Input> = (0..nbe).map(|j| m4k::Input::ByteEna((j + if ab { 2 } else { 0 }) as u8)).collect();
+                        if be_pins.iter().any(|b| c.conns.contains_key(&b.pin_name())) {
+                            let be: Vec<String> = be_pins.iter().map(|&b| net(c, &b.pin_name(), "1'b1")).collect();
+                            conns.push(format!(".port{}byteenamasks({})", p.name, bus(be)));
+                            params.push((format!("port_{}_byte_enable_mask_width", p.name), nbe.to_string()));
+                            params.push((format!("port_{}_byte_size", p.name), (p.bits / nbe).to_string()));
+                        }
+                    }
+                    // A dual port's port A only writes.
+                    if !(op == "dual_port" && p.name == 'a') {
+                        let outs: Vec<String> = (0..p.bits)
+                            .map(|k| match sig_of(c, &format!("DO{}", out_col(&shape, p, k))) {
+                                Some(s) => vid(&s),
+                                None => {
+                                    let u = format!("{}_unused_{}q{k}", atom[name.as_str()], if p.name == 'a' { "" } else { "b" });
+                                    writeln!(v, "wire {};", vid(&u)).unwrap();
+                                    vid(&u)
+                                }
+                            })
+                            .collect();
+                        conns.push(format!(".port{}dataout({})", p.name, bus(outs)));
+                    }
                     for (k, val) in [
                         ("address_width", n.to_string()),
-                        ("data_width", w.to_string()),
+                        ("data_width", p.bits.to_string()),
                         ("first_address", "0".into()),
                         ("last_address", (depth - 1).to_string()),
                         ("logical_ram_depth", depth.to_string()),
-                        ("logical_ram_width", w.to_string()),
+                        ("logical_ram_width", p.bits.to_string()),
                         ("first_bit_number", "0".into()),
-                        ("data_out_clock", "\"none\"".into()),
+                        ("data_out_clock", p.out_reg.map_or("\"none\"".into(), |o| sel(o.clock, "clock"))),
+                        ("data_out_clear", p.out_reg.and_then(|o| o.clear).map_or("\"none\"".into(), |c| sel(c, "clear"))),
                     ] {
-                        p.push((format!("port_{pt}_{k}"), val));
+                        params.push((format!("port_{}_{k}", p.name), val));
+                    }
+                    if p.name == 'b' {
+                        let clk = sel(p.clock, "clock");
+                        params.push(("port_b_address_clock".into(), clk.clone()));
+                        params.push(("port_b_read_enable_write_enable_clock".into(), clk.clone()));
+                        if op == "bidir_dual_port" {
+                            params.push(("port_b_data_in_clock".into(), clk.clone()));
+                            if c.conns.keys().any(|k| k == "BE2" || k == "BE3") {
+                                params.push(("port_b_byte_enable_clock".into(), clk));
+                            }
+                        } else {
+                            params.push(("mixed_port_feed_through_mode".into(), "\"dont_care\"".into()));
+                        }
                     }
                 }
-                if ports.len() == 2 {
-                    p.push(("port_b_address_clock".into(), "\"clock0\"".into()));
-                    p.push(("port_b_read_enable_write_enable_clock".into(), "\"clock0\"".into()));
-                    p.push(("mixed_port_feed_through_mode".into(), "\"dont_care\"".into()));
-                }
-                // Contents in the words of port A: word a bit k at bit
-                // a * w + k, 2,048 bits per mem_init parameter (as
-                // Quartus writes them).
-                let mut bits = Vec::with_capacity((depth * w) as usize);
-                for a in 0..depth as usize {
-                    for k in 0..w as usize {
-                        bits.push(shape.content.get_linear(shape.width.linear(a, k)));
+                writeln!(v, "cycloneii_ram_block {a}(\n  {});", conns.join(",\n  "))?;
+                // Contents in the words of the atom's port A, 2,048 bits
+                // per mem_init parameter (as Quartus writes them).
+                let pa = &ports[0];
+                let depth = 1usize << pa.width.addr_bits();
+                let mut bits = Vec::with_capacity(depth * pa.bits);
+                for word in 0..depth {
+                    for k in 0..pa.bits {
+                        bits.push(shape.content.get_linear(linear(&shape, pa, word, k)));
                     }
                 }
                 for (i, chunk) in bits.chunks(2048).enumerate() {
@@ -475,9 +576,9 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                             char::from_digit(d, 16).unwrap().to_ascii_uppercase()
                         })
                         .collect();
-                    p.push((format!("mem_init{i}"), format!("{}'h{hex}", chunk.len())));
+                    params.push((format!("mem_init{i}"), format!("{}'h{hex}", chunk.len())));
                 }
-                for (k, val) in p {
+                for (k, val) in params {
                     writeln!(v, "defparam {a}.{k} = {val};")?;
                 }
                 writeln!(qsf, "set_location_assignment M4K_X{x}_Y{y} -to {}", atom[name.as_str()])?;
@@ -821,6 +922,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                                 }
                                 M4kPin::Fast(f) => match m4k::CONTROL_PINS[f as usize].0 {
                                     "WE" => "PORTAWE".to_string(),
+                                    "RE" => "PORTBREWE".to_string(),
                                     p => p.to_string(),
                                 },
                                 M4kPin::Ctl(_) => bail!("{}: M4K control input as a sink", n.name),
