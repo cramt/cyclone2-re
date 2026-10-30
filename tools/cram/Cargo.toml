@@ -8,7 +8,7 @@ description = "Cyclone II EP2C35 bitstream reverse engineering: the device datab
 ddb = { path = "../ddb" }
 # The assembler (`cram pack`, `cram svf`) lives in chipsmith (its ADR-0003);
 # the checks here guard that one implementation.
-chipsmith-cyclone2 = { git = "https://github.com/A-H-Technology/chipsmith", rev = "816ddd55dff42c01d063157e3e49b7ad46854882" }
+chipsmith-cyclone2 = { git = "https://github.com/A-H-Technology/chipsmith", rev = "b632455004177987add1f8354c4e0f7bfa979fb5" }
 anyhow = "1"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }

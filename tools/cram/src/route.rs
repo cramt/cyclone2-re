@@ -55,6 +55,11 @@ pub fn element_enum(kind: &str) -> Option<i16> {
         "JTAG_RUNIDLEUSER_PIN" => 367,
         "JTAG_USR1USER_PIN" => 368,
         "ASMI_DATAOUT" => 474,
+        // Multiplier block (X39): product bits onto the routing, and the
+        // five control inputs (clock, enable, clear, signa, signb) fed from
+        // the block's local lines (multiplier fuzz designs).
+        "DSP_BUFFER" => 280,
+        "DSP_CONTROL_INPUT" => 374,
         // Clock controls fed from the core, and PLLs (clock fuzz designs
         // k1-k4, p1-p16): LAB line -> BLOCK_INPUT_MUX -> CLKBUF_IN 4 or
         // CLKBUF_ENABLE; clock pin -> CLKPIN_TO_PLLCLKIN_MUX -> PLL_CLKIN;

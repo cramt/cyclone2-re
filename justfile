@@ -88,3 +88,7 @@ flash rbf:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
     tools/cram/target/release/cram svf {{rbf}} {{without_extension(rbf)}}.svf
     openFPGALoader -c usb-blaster {{without_extension(rbf)}}.svf
+
+# Multiplier fuzz: one design per `<name> <json config>` line of a jobs file (tools/gen_mult.py keys)
+mult-fuzz out jobs:
+    grep -v '^#' {{jobs}} | while read -r name cfg; do printf '%s\0%s\0' "$name" "$cfg"; done | xargs -0 -n 2 -P 6 sh -c 'tools/mult_fuzz.sh {{out}}/$0 "$1"'

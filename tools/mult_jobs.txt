@@ -1,0 +1,26 @@
+# Multiplier fuzz designs: <name> <tools/gen_mult.py config>.
+# just mult-fuzz <out> <this file> runs them all (strip the lines you don't want).
+# fit: one feature each
+f18 {"mults":[{"loc":"DSPMULT_X39_Y5_N0"}]}
+fa {"mults":[{"areg":true}]}
+fb {"mults":[{"breg":true}]}
+fsa {"mults":[{"sareg":true,"sa":"dyn"}]}
+fsb {"mults":[{"sbreg":true,"sb":"dyn"}]}
+fo {"mults":[{"oreg":true}]}
+fe {"mults":[{"oreg":true,"ena":true}]}
+fck {"mults":[{"areg":true,"aclr":"key"}]}
+fcl {"mults":[{"oreg":true,"aclr":"logic","clk":"27"}]}
+fs11 {"mults":[{"sa":"1","sb":"1"}]}
+fsd {"mults":[{"sa":"dyn","sb":"dyn"}]}
+finv {"mults":[{"inv":true}]}
+fw12 {"mults":[{"wa":12,"wb":7}]}
+fw12s {"mults":[{"wa":12,"wb":7,"sa":"1","sb":"1"}]}
+fw1 {"mults":[{"wa":1,"wb":18}]}
+fw10 {"mults":[{"wa":18,"wb":10,"sb":"dyn"}]}
+n0 {"mults":[{"wa":9,"wb":9,"loc":"DSPMULT_X39_Y7_N0","oloc":"DSPOUT_X39_Y7_N2"}]}
+n1 {"mults":[{"wa":9,"wb":9,"loc":"DSPMULT_X39_Y7_N1","oloc":"DSPOUT_X39_Y7_N3"}]}
+n01 {"mults":[{"wa":9,"wb":9,"loc":"DSPMULT_X39_Y7_N0","oloc":"DSPOUT_X39_Y7_N2"},{"wa":9,"wb":9,"sa":"1","loc":"DSPMULT_X39_Y7_N1","oloc":"DSPOUT_X39_Y7_N3"}]}
+n01r {"mults":[{"wa":9,"wb":9,"areg":true,"loc":"DSPMULT_X39_Y8_N0","oloc":"DSPOUT_X39_Y8_N2"},{"wa":9,"wb":9,"breg":true,"oreg":true,"loc":"DSPMULT_X39_Y8_N1","oloc":"DSPOUT_X39_Y8_N3"}]}
+n1o {"mults":[{"wa":5,"wb":9,"oreg":true,"loc":"DSPMULT_X39_Y9_N1","oloc":"DSPOUT_X39_Y9_N3"}]}
+n0w {"mults":[{"wa":9,"wb":3,"sa":"1","sb":"1","loc":"DSPMULT_X39_Y9_N0","oloc":"DSPOUT_X39_Y9_N2"}]}
+m4 {"mults":[{"loc":"DSPMULT_X39_Y35_N0"},{"loc":"DSPMULT_X39_Y34_N0","areg":true,"breg":true,"oreg":true},{"loc":"DSPMULT_X39_Y18_N0","sa":"dyn"},{"loc":"DSPMULT_X39_Y19_N0"}]}

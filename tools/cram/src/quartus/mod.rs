@@ -15,6 +15,7 @@ pub mod hard;
 pub mod io;
 pub mod logic;
 pub mod m4k;
+pub mod mult;
 pub mod pll;
 
 pub struct Loaded {
@@ -38,8 +39,10 @@ pub fn load(dev: &Device, dir: &Path) -> Result<Loaded> {
     let (m4ks, ram_unmodelled) = m4k::from_atoms(&atoms, &sigs, &rcf_text)?;
     let hard = hard::from_atoms(&atoms, &sigs)?;
     let (plls, pll_unmodelled) = pll::from_atoms(&atoms, &sigs)?;
+    let (mults, mult_unmodelled) = mult::from_atoms(&atoms, &sigs)?;
     let mut unmodelled = unmodelled;
     unmodelled.extend(ram_unmodelled);
     unmodelled.extend(pll_unmodelled);
-    Ok(Loaded { design: PhysDesign { logic, pins, unused_pins, vccio: chipsmith_cyclone2::bitstream::io::Vccio::FromPins, m4ks, hard, plls, nets }, unmodelled, skipped_resources: skipped.len() })
+    unmodelled.extend(mult_unmodelled);
+    Ok(Loaded { design: PhysDesign { logic, pins, unused_pins, vccio: chipsmith_cyclone2::bitstream::io::Vccio::FromPins, m4ks, mults, hard, plls, nets }, unmodelled, skipped_resources: skipped.len() })
 }
