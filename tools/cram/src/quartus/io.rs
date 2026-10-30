@@ -41,6 +41,8 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
     // rcf sinks into pins: (port, DATAIN|OE) -> local line feeding it.
     let mut lines: HashMap<(String, String), u32> = HashMap::new();
     let mut datain: HashMap<String, [bool; 2]> = HashMap::new();
+    // Pins a PLL's external clock output drives (rcf IO_RAW_DATAOUT).
+    let mut pll_clock: std::collections::HashSet<String> = Default::default();
     // (port, INCLK|OUTCLK) -> I/O clock buffer index.
     let mut clocks: HashMap<(String, String), u32> = HashMap::new();
     for s in sigs {
@@ -50,6 +52,10 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
                 let r = &s.resources[from];
                 ensure!(r.kind == "BLK_CLK_BUF", "{}: I/O register clock from {}", s.name, r.kind);
                 clocks.insert((d.cell.clone(), d.port.clone()), r.index as u32);
+                continue;
+            }
+            if s.resources[from].kind == "IO_RAW_DATAOUT" && d.port == "DATAIN" {
+                pll_clock.insert(d.cell.clone());
                 continue;
             }
             if !["IO_DATAOUT", "IO_OE_PIN"].contains(&s.resources[from].kind.as_str()) {
@@ -109,6 +115,7 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
             let data_reg = reg("output", "OUTCLK")?;
             let data = match (a.port("datain"), lines.get(&(port.clone(), "DATAIN".into()))) {
                 (Some(c @ ("gnd" | "vcc")), _) if data_reg.is_none() => OutData::Const(c == "vcc"),
+                (_, None) if data_reg.is_none() && pll_clock.contains(&port) => OutData::PllClock,
                 (d, Some(&line)) => OutData::Line { line, inverted: d.is_some_and(|d| d.starts_with('!')), reg: data_reg },
                 (d, _) => bail!("{}: output data {d:?} neither routed nor constant (registered {})", a.name, data_reg.is_some()),
             };
