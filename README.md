@@ -607,7 +607,7 @@ this repo's `quartus/pll.rs`. **[obs]** unless marked.
 Not covered: LAB clocks from local routing rather than a global, two
 different aclr signals in one LAB, inverted aclr, a second clock domain
 sharing a buffer, `LE_USE_REG_CASCADE_ARM` (never seen changing),
-multipliers, a PLL's external clock output, clock switchover, its
+a PLL's external clock output, clock switchover, its
 `clkena` outputs (M4K: [below](#m4k-ram-blocks-phase-5)). These are flagged as `unmodelled` rather than
 guessed.
 
