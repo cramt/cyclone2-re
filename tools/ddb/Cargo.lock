@@ -48,11 +48,12 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "chipsmith-cyclone2"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=b632455004177987add1f8354c4e0f7bfa979fb5#b632455004177987add1f8354c4e0f7bfa979fb5"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c83f4aac01aed12cb2eb06eab4d031e42943f59d#c83f4aac01aed12cb2eb06eab4d031e42943f59d"
 dependencies = [
  "anyhow",
  "chipsmith-jtag",
  "chipsmith-netlist",
+ "chipsmith-place",
  "chipsmith-route",
  "chipsmith-synth",
  "lzma-rust2",
@@ -65,7 +66,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-jtag"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=b632455004177987add1f8354c4e0f7bfa979fb5#b632455004177987add1f8354c4e0f7bfa979fb5"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c83f4aac01aed12cb2eb06eab4d031e42943f59d#c83f4aac01aed12cb2eb06eab4d031e42943f59d"
 dependencies = [
  "anyhow",
  "rusb",
@@ -74,7 +75,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-netlist"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=b632455004177987add1f8354c4e0f7bfa979fb5#b632455004177987add1f8354c4e0f7bfa979fb5"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c83f4aac01aed12cb2eb06eab4d031e42943f59d#c83f4aac01aed12cb2eb06eab4d031e42943f59d"
 dependencies = [
  "rustc-hash",
  "serde",
@@ -83,9 +84,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chipsmith-place"
+version = "0.1.0"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c83f4aac01aed12cb2eb06eab4d031e42943f59d#c83f4aac01aed12cb2eb06eab4d031e42943f59d"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "chipsmith-route"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=b632455004177987add1f8354c4e0f7bfa979fb5#b632455004177987add1f8354c4e0f7bfa979fb5"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c83f4aac01aed12cb2eb06eab4d031e42943f59d#c83f4aac01aed12cb2eb06eab4d031e42943f59d"
 dependencies = [
  "anyhow",
  "lzma-rust2",
@@ -96,7 +105,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-synth"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=b632455004177987add1f8354c4e0f7bfa979fb5#b632455004177987add1f8354c4e0f7bfa979fb5"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c83f4aac01aed12cb2eb06eab4d031e42943f59d#c83f4aac01aed12cb2eb06eab4d031e42943f59d"
 dependencies = [
  "anyhow",
  "chipsmith-netlist",
@@ -154,6 +163,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-deque"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
+
+[[package]]
 name = "crypto-common"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -184,6 +218,12 @@ dependencies = [
  "const-oid",
  "crypto-common",
 ]
+
+[[package]]
+name = "either"
+version = "1.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "embedded-io"
@@ -315,6 +355,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
 ]
 
 [[package]]
