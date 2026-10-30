@@ -234,6 +234,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
             Bel::Lut { x, y, k } => format!("lc_x{x}_y{y}_n{}", 2 * k),
             Bel::Ff { x, y, k } => format!("ff_x{x}_y{y}_n{}", 2 * k + 1),
             Bel::ClkCtrl { g } => format!("clkctrl_g{g}"),
+            Bel::PllOut { x, y } => format!("pllout_x{x}_y{y}"),
             Bel::M4k { x, y } => format!("m4k_x{x}_y{y}"),
             Bel::Mult { y } => format!("mult_y{y}"),
             Bel::Jtag => "jtag".to_string(),
@@ -259,7 +260,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                 ("LCELL_COMB", "COMBOUT") => format!("{a}_combout"),
                 ("LCELL_COMB", "COUT") => format!("{a}_cout"),
                 ("LCELL_FF", "REGOUT") => format!("{a}_regout"),
-                ("CLKCTRL", "OUTCLK") => format!("{a}_outclk"),
+                ("CLKCTRL" | "PLLOUT", "OUTCLK") => format!("{a}_outclk"),
                 // A plain input is a port of the netlist; an input with its
                 // register is an I/O atom, like any other pin.
                 ("CY2_IBUF", "COMBOUT") if !c.params.contains_key(register_param::INPUT) => a.clone(),
@@ -776,6 +777,26 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                 writeln!(v, "defparam {a}.ena_register_mode = \"none\";")?;
                 writeln!(qsf, "set_location_assignment CLKCTRL_G{g} -to {}", atom[name.as_str()])?;
             }
+            Bel::PllOut { x, y } => {
+                writeln!(v, "cycloneii_clkctrl {a}(")?;
+                writeln!(v, "  .inclk({{1'b0, 1'b0, 1'b0, {}}}),", net(c, "INCLK", "1'b0"))?;
+                writeln!(v, "  .outclk({}));", net(c, "OUTCLK", ""))?;
+                writeln!(v, "defparam {a}.clock_type = \"external clock output\";")?;
+                writeln!(v, "defparam {a}.ena_register_mode = \"none\";")?;
+                // Its z: the CLKBUF_IN it is fed from.
+                let z = r
+                    .nets
+                    .iter()
+                    .flat_map(|(_, n)| &n.pips)
+                    .find_map(|p| match (p.src, p.dst) {
+                        (Wire::Node(s), Wire::PllOutIn { x: px, y: py }) if (px, py) == (x, y) => {
+                            Some(dev.routing.templates[dev.routing.elements[s.0 as usize].template as usize].z)
+                        }
+                        _ => None,
+                    })
+                    .with_context(|| format!("{name}: input not routed"))?;
+                writeln!(qsf, "set_location_assignment CLKCTRL_X{x}_Y{y}_N{z} -to {}", atom[name.as_str()])?;
+            }
             Bel::Ioe { x, y, z } => {
                 let p = &atom[name.as_str()];
                 writeln!(qsf, "set_location_assignment PIN_{} -to {p}", pin_at(io, x, y, z)?.name)?;
@@ -939,7 +960,10 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
         };
         for p in &n.pips {
             let rs = resource(dev, p.src, ioe_out_x);
-            let rd = resource(dev, p.dst, ioe_out_x);
+            // A PLL's external clock output reaches its pin on
+            // IO_RAW_DATAOUT, which the rcf ends with (no IO_DATAOUT).
+            let raw = matches!(p.src, Wire::Node(s) if dev.element_enum(s) == 303);
+            let rd = if raw { None } else { resource(dev, p.dst, ioe_out_x) };
             match (rs, rd) {
                 (Some(s), Some(d)) => {
                     seen(&s, &mut order);
@@ -1024,6 +1048,14 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                         Wire::ClkIn { g } => {
                             let c = cell_at.get(&Bel::ClkCtrl { g }).context("clock control")?;
                             format!("dest = ( {}, INCLK[0] );", atom[*c])
+                        }
+                        Wire::PllOutIn { x, y } => {
+                            let c = cell_at.get(&Bel::PllOut { x, y }).context("external clock output")?;
+                            format!("dest = ( {}, INCLK[0] );", atom[*c])
+                        }
+                        Wire::Ioe { x, y, z, pin: IoePin::DataOut } if raw => {
+                            let c = cell_at.get(&Bel::Ioe { x, y, z }).context("PLL clock output pin")?;
+                            format!("dest = ( {}, DATAIN );", atom[*c])
                         }
                         Wire::M4k { x, y, pin } => {
                             let c = cell_at.get(&Bel::M4k { x, y }).context("M4K at its pin")?;

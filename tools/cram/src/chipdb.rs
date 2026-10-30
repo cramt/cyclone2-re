@@ -553,6 +553,46 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
             ("OUTCLK".into(), out, true),
         ]));
     }
+    // A PLL's external clock output: the CLKBUF_OUT that drives
+    // IO_RAW_DATAOUT (303) rather than a global is the clock control of
+    // that PLL's PLL<n>_OUT pin (on the DE2, PLL_1's is PIN_AA7, DRAM_CLK).
+    // Bel `PLLOUT`; its input select takes the side's CLKBUF_INs like a
+    // global one's, though only counter 2 reaches it. The raw line ends at
+    // the pin's output (rcf IO_RAW_DATAOUT -> DATAIN), which the routing
+    // database leaves out.
+    for o in (0..n).filter(|&i| tmpl(i).element_enum == 515) {
+        let raw: Vec<usize> = r
+            .fanout(o)
+            .filter(|gid| gid & ROUTER_ID_BIT != 0)
+            .map(|gid| (gid & !ROUTER_ID_BIT) as usize)
+            .filter(|&d| d < n && tmpl(d).element_enum == 303)
+            .collect();
+        let [rn] = raw[..] else { continue };
+        let (x, y) = home(o);
+        let z = tmpl(o).z;
+        let out = alias_g(&mut ltiles, &mut members, (x, y), o);
+        let mut srcs = Vec::new();
+        for idx in 0..8 {
+            if let Ok(i) = find(x, y, 513, z, idx) {
+                srcs.push(alias_g(&mut ltiles, &mut members, (x, y), i));
+            }
+        }
+        let t = ltiles.get_mut(&(x, y)).unwrap();
+        t.wire("PLLOUT.INCLK", "CLKCTRL_INTERNAL");
+        for s in srcs {
+            t.pip(&s, "PLLOUT.INCLK");
+        }
+        t.bels.push(("PLLOUT".into(), "PLLOUT".into(), 49, vec![
+            ("INCLK".into(), "PLLOUT.INCLK".into(), false),
+            ("OUTCLK".into(), out, true),
+        ]));
+        let (px, py) = home(rn);
+        let dout = format!("IOE{}.DATAOUT", tmpl(rn).z);
+        let g = alias_g(&mut ltiles, &mut members, (px, py), rn);
+        let t = ltiles.get_mut(&(px, py)).unwrap();
+        ensure!(t.wires.contains_key(&dout), "IO_RAW_DATAOUT at X{px} Y{py} z{} has no pad", tmpl(rn).z);
+        t.pip(&g, &dout);
+    }
     // The PLLs (chipsmith `bitstream::pll`): bel `PLL` in each PLL's tile.
     // INCLK is the PLL's clock input element (PLL_CLKIN 0, fed from the
     // dedicated clock pins of its side through CLKPIN_TO_PLLCLKIN_MUX), CLKk

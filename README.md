@@ -601,13 +601,31 @@ this repo's `quartus/pll.rs`. **[obs]** unless marked.
   sweep m4-m32, n2m10, n2m16, n3m24, n4m12, n4m32. Held out: p15 (10 MHz,
   post-scale 2), p16 (three outputs with phase and duty), a1. 58 of 59
   designs byte-identical in `cram roundtrip`; p12 (counter 2 also onto the
-  `PLL1_OUT` pin) is not modelled. m = 2, 3 didn't compile (Quartus was
-  killed by the host), so the lock window below m = 4 is unknown.
+  `PLL1_OUT` pin) was not modelled then (external clock output, below).
+  m = 2, 3 didn't compile (Quartus was killed by the host), so the lock
+  window below m = 4 is unknown.
+- **External clock output** (2026-10-30). Counter 2 is the only one wired
+  to its PLL's `PLL<n>_OUT` pin (PLL_1's is PIN_AA7, the DE2's DRAM_CLK):
+  `PLL_BUFFER` 2 → `CLKBUF_IN` of a clock control of its own (Quartus
+  `CLKCTRL_X0_Y1_N1` for PLL_1, `clock_type = "external clock output"`) →
+  its `CLKBUF_OUT` → `IO_RAW_DATAOUT` (303) → the pin's `DATAIN`. The
+  routing database stops at `IO_RAW_DATAOUT`; the chip database adds the
+  last hop and a `PLLOUT` bel per PLL. Quartus maps whichever altpll port
+  drives the pin onto c2 (`clk0_counter = "c2"`). Bits: none in the clock
+  control, `IO_CORE_PLL_SELECT` (146) on the pin, and the pin's data path
+  left alone (no `IO_DATA_INVERT`), found as the whole residual of a
+  Quartus design with the pin (100 MHz, -3 ns) assembled without it.
+  chipsmith's flow builds it (CLK2 to PIN_AA7) Quartus byte-identical.
+  That Quartus design itself still misses two lock-window bits in `cram
+  roundtrip`: its -3 ns shift moves the feedback counter (m 20,
+  `m_initial` 4) and Quartus picks `SELECT_LOCK_WINDOW` 11 where the m
+  sweep has 15 at m = 20. Negative shifts aren't modelled (chipsmith
+  rejects them).
 
 Not covered: LAB clocks from local routing rather than a global, two
 different aclr signals in one LAB, inverted aclr, a second clock domain
 sharing a buffer, `LE_USE_REG_CASCADE_ARM` (never seen changing),
-a PLL's external clock output, clock switchover, its
+negative PLL phase shifts, clock switchover, a PLL's
 `clkena` outputs (M4K: [below](#m4k-ram-blocks-phase-5)). These are flagged as `unmodelled` rather than
 guessed.
 
@@ -1280,7 +1298,7 @@ device database (`db/`, our own format) and our own tools.
 | 2 | Tile grid: LAB, M4K, multiplier, IOE, PLL coordinates | LAB grid and its CRAM frame/row placement observed; IOE coordinates and their CRAM/CFF bits from pad/pkg + asmdb; the 105 M4Ks (X13/X26/X52, one per LAB row, 70 rows × 166 frames) and 35 multipliers (X39) placed from the asmdb block lists |
 | 3 | Logic: LUT truth tables, FF modes, carry chains | asmdb decoded. LUT, LE inputs A-D, carry, registers, packing, LAB clocks/CE/aclr/sclr/sload placed by the asmdb, setting values fit on 9 fuzz designs. All 8 held-out counters and all 9 LE fuzz designs byte-identical with the I/O model |
 | 4 | Routing: local, R4/C4/R24/C16 muxes, global clocks | flat CRAM address → frame/bit solved; every routing bit of 17 fuzz designs predicted from ddb, 0 misses; held-out designs reassemble byte-identically. Global clocks (pin → clkctrl → GCLK → RCLK → LAB) modelled: graph plus asmdb clkctrl select, checked on 2 clock pins and 4 global nets. Clock controls fed from the core (a register, the JTAG block's TCK) and their enables: 8 of 8 clock fuzz designs byte-identical |
-| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers incl. OE register and power-up high, output enable incl. inversion, tri-state, bidir and open drain, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical (24/24 held-out output-enable designs). Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K: done for Quartus designs (`cram roundtrip`): single port, simple and true dual port, ROM, ×1-×36 and mixed widths, packed ×32/×36 single ports, output registers, clock enables, clears, byte enables, initial contents, RAMs over several blocks; content layout, input pins and settings from the asmdb, values fit on 28 designs; 52 of 53 held-out designs byte-identical (the miss is an LE clock choice). In the open flow: single port ×1-×18, simple dual port ×1-×36 on one clock, ROMs, initial contents (`examples/ram`, `examples/ram_widths` byte-identical). PLLs: counters, phase, duty cycle, n 1-4, m 4-32, the VCO post-scale, loop and lock settings, both feedback modes, lock output, areset and pfdena from the core, inputs from the clock pins of PLL_1-3; 58 of 59 PLL and clock fuzz designs byte-identical (not the external clock output). In chipsmith's flow (`CY2_PLL`) byte-identical with Quartus. Multipliers: 35 blocks placed from the asmdb, data and sign inputs, nine-bit mode, input/output registers with their clock, enable and clear (26 fuzz designs, `tools/mult_jobs.txt`); zero residual bits on the nine registered designs checked. Not covered: sign registers in the open flow, two products in one block |
+| 5 | Hard blocks: IOE standards, M4K, multipliers, PLLs | IOE: done for single-ended I/O. Pin → IOE from pad/pkg, every IOE bit from the asmdb, values learned (roles, drive, pull-up, bus hold, I/O registers incl. OE register and power-up high, output enable incl. inversion, tri-state, bidir and open drain, 3.3/2.5/1.8/1.5 V standards, unused-pin modes); held-out random pin sets byte-identical (24/24 held-out output-enable designs). Not covered: LVDS/differential, VREF standards, DDIO, register clear/enable, non-default delay chains. M4K: done for Quartus designs (`cram roundtrip`): single port, simple and true dual port, ROM, ×1-×36 and mixed widths, packed ×32/×36 single ports, output registers, clock enables, clears, byte enables, initial contents, RAMs over several blocks; content layout, input pins and settings from the asmdb, values fit on 28 designs; 52 of 53 held-out designs byte-identical (the miss is an LE clock choice). In the open flow: single port ×1-×18, simple dual port ×1-×36 on one clock, ROMs, initial contents (`examples/ram`, `examples/ram_widths` byte-identical). PLLs: counters, phase, duty cycle, n 1-4, m 4-32, the VCO post-scale, loop and lock settings, both feedback modes, lock output, areset and pfdena from the core, inputs from the clock pins of PLL_1-3; 58 of 59 PLL and clock fuzz designs byte-identical (p12, the external clock output, not re-run since it was modelled on 2026-10-30; chipsmith builds it byte-identically). In chipsmith's flow (`CY2_PLL`) byte-identical with Quartus. Multipliers: 35 blocks placed from the asmdb, data and sign inputs, nine-bit mode, input/output registers with their clock, enable and clear (26 fuzz designs, `tools/mult_jobs.txt`); zero residual bits on the nine registered designs checked. Not covered: sign registers in the open flow, two products in one block |
 | 6 | Flow: yosys techmap, nextpnr arch, Rust bitstream packer | done for LUT/carry/register logic, global clocks from pins and LVTTL pins including tri-state and bidirectional ones: `just open-build`, no Quartus involved (packing, base image and chip database from the committed `db/`, no Quartus files at use time). M4K RAM (single port, simple dual port, ROM, ×1-×36). The same P&R assembled by Quartus is byte-identical for blinky, lfsr, uart_tx, picorv32, bidir, ram and ram_widths. Multipliers (chipsmith `CY2_MULT`, with registers), PLLs and registered I/O came with chipsmith's flow (its README) |
 | 7 | Loader: open JTAG programming (openFPGALoader already speaks USB-Blaster) | done: `cram svf` writes the JTAG stream (RBF minus its passive-serial preamble) with a CONF_DONE check; openFPGALoader plays it. Open-built designs run on a DE2. EPCS: the JTAG and serial-flash blocks are modelled (Quartus designs byte-identical, chipsmith's flash loader validates byte-identical) and chipsmith programs the EPCS16 through them |
 
