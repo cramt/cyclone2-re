@@ -65,3 +65,50 @@ n3m24 {"kind": "pll", "outs": [{"mul": 24, "div": 24}], "atom": {"inclk0_input_f
 n4m32 {"kind": "pll", "outs": [{"mul": 32, "div": 32}], "atom": {"inclk0_input_frequency": 10000, "m": 32, "n": 4, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 32, "clk0_divide_by": 32, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
 n2m10 {"kind": "pll", "outs": [{"mul": 10, "div": 16}], "atom": {"inclk0_input_frequency": 6250, "m": 10, "n": 2, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 10, "clk0_divide_by": 16, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
 n4m12 {"kind": "pll", "outs": [{"mul": 12, "div": 32}], "atom": {"inclk0_input_frequency": 3750, "m": 12, "n": 4, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 12, "clk0_divide_by": 32, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+# Phase shifts, negative ones included (2026-10-31), and the lock window by phase-detector period (lw*)
+q1 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-3000"}]}
+q2 {"kind": "pll", "outs": [{"mul": 2, "div": 1}, null, {"mul": 2, "div": 1, "phase": "-1500"}], "extout": "PIN_AA7"}
+q3 {"kind": "pll", "outs": [{"mul": 2, "div": 1}, null, {"mul": 2, "div": 1, "phase": "8500"}], "extout": "PIN_AA7"}
+r1 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "100"}]}
+r2 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "700"}]}
+r3 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "1250"}]}
+r4 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-700"}]}
+r5 {"kind": "pll", "outs": [{"mul": 1, "div": 1, "phase": "333"}]}
+r6 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "100"}, {"mul": 2, "div": 1, "phase": "700"}]}
+r7 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-100"}]}
+r8 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-12000"}]}
+r9 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "15000"}]}
+r11 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-1500"}, {"mul": 1, "div": 1, "phase": "-1500"}]}
+r12 {"kind": "pll", "outs": [{"mul": 1, "div": 5, "phase": "-2000"}]}
+r13 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-1250"}, {"mul": 2, "div": 1, "phase": "625"}]}
+s1 {"kind": "pll", "outs": [{"mul": 1, "div": 2, "phase": "2250"}]}
+s4 {"kind": "pll", "outs": [{"mul": 1, "div": 4, "phase": "2000"}]}
+s7 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-20000"}]}
+s8 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "20000"}]}
+s9 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-700"}, {"mul": 2, "div": 1, "phase": "700"}]}
+s10 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "50"}, {"mul": 2, "div": 1, "phase": "100"}]}
+k1 {"kind": "pll", "outs": [{"mul": 1, "div": 5, "phase": "417"}]}
+k2 {"kind": "pll", "outs": [{"mul": 1, "div": 5, "phase": "833"}]}
+k3 {"kind": "pll", "outs": [{"mul": 1, "div": 5, "phase": "1250"}]}
+k4 {"kind": "pll", "outs": [{"mul": 1, "div": 5, "phase": "1667"}]}
+k5 {"kind": "pll", "outs": [{"mul": 1, "div": 5, "phase": "2083"}]}
+k6 {"kind": "pll", "outs": [{"mul": 1, "div": 5, "phase": "2500"}]}
+k7 {"kind": "pll", "outs": [{"mul": 1, "div": 5, "phase": "2917"}]}
+k8 {"kind": "pll", "outs": [{"mul": 1, "div": 5, "phase": "833"}, {"mul": 1, "div": 5, "phase": "2500"}]}
+t16 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "18750"}]}
+t17 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-18750"}]}
+t40 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-40000"}]}
+t18 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "18875"}]}
+t19 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-18875"}]}
+t20 {"kind": "pll", "outs": [{"mul": 2, "div": 1, "phase": "-15000"}, {"mul": 2, "div": 1, "phase": "15000"}]}
+lw1 {"kind": "pll", "outs": [{"mul": 18, "div": 8}], "atom": {"inclk0_input_frequency": 20000, "m": 18, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 18, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+lw2 {"kind": "pll", "outs": [{"mul": 10, "div": 8}], "atom": {"inclk0_input_frequency": 20000, "m": 10, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 10, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+lw3 {"kind": "pll", "outs": [{"mul": 14, "div": 8}], "atom": {"inclk0_input_frequency": 25000, "m": 14, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 14, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+lw4 {"kind": "pll", "outs": [{"mul": 20, "div": 16}], "atom": {"inclk0_input_frequency": 10000, "m": 20, "n": 2, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 20, "clk0_divide_by": 16, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+lwb20400 {"kind": "pll", "outs": [{"mul": 16, "div": 8}], "atom": {"inclk0_input_frequency": 20400, "m": 16, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 16, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+lwb20800 {"kind": "pll", "outs": [{"mul": 16, "div": 8}], "atom": {"inclk0_input_frequency": 20800, "m": 16, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 16, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+lwb21250 {"kind": "pll", "outs": [{"mul": 16, "div": 8}], "atom": {"inclk0_input_frequency": 21250, "m": 16, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 16, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+lwb10600 {"kind": "pll", "outs": [{"mul": 8, "div": 8}], "atom": {"inclk0_input_frequency": 10600, "m": 8, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 8, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+lwb13100 {"kind": "pll", "outs": [{"mul": 8, "div": 8}], "atom": {"inclk0_input_frequency": 13100, "m": 8, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 8, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+lwb5600 {"kind": "pll", "outs": [{"mul": 4, "div": 8}], "atom": {"inclk0_input_frequency": 5600, "m": 4, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 4, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+lwb8100 {"kind": "pll", "outs": [{"mul": 4, "div": 8}], "atom": {"inclk0_input_frequency": 8100, "m": 4, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 4, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
