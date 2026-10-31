@@ -16,7 +16,8 @@ Config keys:
                    counter shown on the LEDs
   at       clock control location for div/ena, e.g. "CLKCTRL_G9"
   pll keys:
-    clk      input pin: "CLOCK_50" (N2), "CLOCK_27" (D13), "EXT_CLOCK" (P26)
+    clk      input pin: "CLOCK_50" (N2), "CLOCK_27" (D13), "EXT_CLOCK" (P26),
+             "CLK_AE14", "CLK_AF14", "CLK_AD13", "CLK_AC13" (bottom edge)
     outs     list of {"mul": m, "div": d, "phase": ps (string, ps),
              "duty": %} for c0, c1, c2 (null skips that output)
     mode     altpll operation_mode: "NORMAL" (default), "NO_COMPENSATION"
@@ -25,7 +26,8 @@ Config keys:
     areset   areset from KEY[0] (inverted, active-low key)
     pfdena   pfdena from SW[17]
     extout   c2 also drives a pin through the PLL's dedicated clock out
-             (pin name, e.g. "PIN_E15"; the output named `PLL_OUT`)
+             (pin name, e.g. "PIN_E15"; the output named `PLL_OUT`;
+             true: no location, the fitter picks the pin)
     at       PLL location, e.g. "PLL_1"
     atom     instantiate cycloneii_pll with these parameters instead of
              altpll (outs then only says which outputs get a counter)
@@ -46,6 +48,9 @@ LEDG = ["AE22", "AF22", "W19", "V18", "U18", "U17", "AA20", "Y18", "Y12"]
 SW = {0: "N25", 1: "N26", 2: "P25", 17: "V2"}
 KEY = {0: "G26", 1: "N23"}
 CLK = {"CLOCK_50": ("N2", 20000), "CLOCK_27": ("D13", 37037), "EXT_CLOCK": ("P26", 20000)}
+# The bottom edge's dedicated clock pins (banks 7 and 8; SW[3]-SW[6] on the
+# DE2), claimed at 50 MHz.
+CLK.update({f"CLK_{p}": (p, 20000) for p in ["AE14", "AF14", "AD13", "AC13"]})
 
 out = pathlib.Path(sys.argv[1])
 cfg = json.loads(sys.argv[2])
@@ -176,7 +181,8 @@ elif kind == "pll":
     if cfg.get("extout"):
         ports.add("output PLL_OUT")
         v.append("  assign PLL_OUT = c[2];")
-        qsf.append(f"set_location_assignment {cfg['extout']} -to PLL_OUT")
+        if cfg["extout"] is not True:
+            qsf.append(f"set_location_assignment {cfg['extout']} -to PLL_OUT")
     if "at" in cfg:
         qsf.append(f"set_location_assignment {cfg['at']} -to {'pll' if 'atom' in cfg else 'pll|pll'}")
 elif kind == "none":
