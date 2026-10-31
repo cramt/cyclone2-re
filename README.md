@@ -541,6 +541,61 @@ k8 (TCK, falling edge). All 8 byte-identical (`cram roundtrip`); k7 (an
 unregistered enable from the core) compiled after the model and was
 byte-identical first time.
 
+### Global clocks as data (phase 4)
+
+A global clock leaves the clock network for data through the row clock
+buffers, on edges the routing database already has: `BLK_CLK_BUF` (560)
+→ `LOCAL_INTERCONNECT` (276), 28,848 of them. In 2,282 tiles (every LAB
+and the left and right I/O tiles among them) each of the six
+buffers drives two of the tile's lines, one bit an edge; in the 60 top and
+bottom I/O tiles each drives four, two lines of its own tile and two of
+the tile to its left, two bits an edge. From the line
+on it is any data route: an LE input, an I/O cell's `IO_DATAOUT`. No
+dedicated clock-to-data mux and no bits beyond the edges' own. Observed
+(Quartus 13.0sp1, `tools/clk_jobs.txt` designs gd1-gd15, `gen_clk.py`
+key `data`):
+
+- **A PLL clock onto an ordinary pin** (gd2, gd7, gd8, gd11, gd15:
+  Terasic's `assign VGA_CLK = pll_clk`, PIN_B8). Top and bottom pins:
+  `GLOBAL_CLK_V` → `TB_IO_CLK` (the I/O row's clock spine) → the I/O
+  tile's `BLK_CLK_BUF` → `LOCAL_INTERCONNECT` → `IO_DATAOUT`. Side pins:
+  `GLOBAL_CLK_V` → `LAB_CLK` → the I/O tile's `BLK_CLK_BUF` → line → pin
+  (gd8: PIN_A5, AE12, J1, D25 on all four sides from one global). An
+  inverted clock (gd7, `~c0`) takes the same route and inverts in the I/O
+  cell. A PLL output used only as data still gets a clock control of its
+  own and a global (gd11). Counter 2 onto an ordinary pin and onto its
+  `PLL<n>_OUT` pin in one design (gd15) uses both paths: the global for
+  B8 and A5, the external clock output for AA7.
+- **Into a LUT** (gd3, gd5 a mux, gd9 beside a pin): `GLOBAL_CLK_V` →
+  `LAB_CLK` → `BLK_CLK_BUF` → line → LE input, the LUT's other inputs from
+  ordinary routing.
+- **Into a register's data** (gd13, sampled on another global): through
+  the LE's LUT like any other data.
+- **A dedicated clock pin as data** (gd1, gd6, gd10, gd14: CLOCK_50 onto
+  a pin, into a LUT, into a register's data): not through its global.
+  The pin's `CLK_BUFFER` drives R24 and C4 lines itself, and Quartus routes
+  the data from there, whether or not the pin also feeds a clock control
+  (gd10: CLOCK_50 used only as data has no clock control at all).
+- **A clock from the core as data** (gd12, and the divided clocks of
+  k1-k6): all its loads go on the global, its own next-state LUT included
+  (`div[3]~0` reads `div[3]` through `BLK_CLK_BUF` → line).
+
+All 15 designs but gd4 are byte-identical in `cram roundtrip` with the
+chip database as it was: nextpnr's chip database has every graph edge as
+a pip, so chipsmith routes these with no database change. gd4 differs by
+2 core bits for an unrelated reason: Quartus clocked its one sampling
+register from CLOCK_50 over a LAB line (`LAB_CONTROL_MUX` as the clock), a
+LAB clock from local routing, which is in the not-covered list below;
+gd13, the same thing sampled on a global, is byte-identical.
+
+chipsmith builds a PLL clock as data the way Quartus does (2026-10-31):
+every load of a PLL output but its external clock output goes on the
+global, and counter 2 alone on a pin that isn't its `PLL<n>_OUT` pin goes
+on the global too. A clock pin's other loads keep their own routing. Its
+vga-pattern (`VGA_CLK = ~pclk` on B8) and three designs (a PLL clock into
+a LUT and onto B8, counter 2 onto A5 alone and beside a register, counter
+2 onto AA7) are Quartus byte-identical through `tools/validate.sh`.
+
 ### PLLs (phase 5)
 
 The EP2C35's four PLLs, from Quartus designs (`cycloneii_pll` atoms in the
