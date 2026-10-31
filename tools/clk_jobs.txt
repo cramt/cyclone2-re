@@ -112,3 +112,20 @@ lwb10600 {"kind": "pll", "outs": [{"mul": 8, "div": 8}], "atom": {"inclk0_input_
 lwb13100 {"kind": "pll", "outs": [{"mul": 8, "div": 8}], "atom": {"inclk0_input_frequency": 13100, "m": 8, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 8, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
 lwb5600 {"kind": "pll", "outs": [{"mul": 4, "div": 8}], "atom": {"inclk0_input_frequency": 5600, "m": 4, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 4, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
 lwb8100 {"kind": "pll", "outs": [{"mul": 4, "div": 8}], "atom": {"inclk0_input_frequency": 8100, "m": 4, "n": 1, "c0_high": 4, "c0_low": 4, "c0_mode": "even", "c0_initial": 1, "c0_ph": 0, "clk0_multiply_by": 4, "clk0_divide_by": 8, "clk0_counter": "c0", "clk1_counter": "c1", "clk2_counter": "c2", "c1_mode": "bypass", "c2_mode": "bypass", "m_initial": 1, "m_ph": 0}}
+# A global clock as data (2026-10-31, README "Global clocks as data"):
+# CLOCK_50 and a PLL clock onto ordinary pins, into LUTs and register data.
+gd1 {"kind": "div", "data": {"src": "CLOCK_50", "sinks": [{"pin": "PIN_B8"}]}}
+gd2 {"kind": "pll", "outs": [{"mul": 1, "div": 2}], "data": {"src": "c[0]", "sinks": [{"pin": "PIN_B8"}]}}
+gd3 {"kind": "pll", "outs": [{"mul": 1, "div": 2}], "data": {"src": "c[0]", "sinks": [{"lut": "and"}]}}
+gd4 {"kind": "pll", "outs": [{"mul": 1, "div": 2}], "data": {"src": "c[0]", "sinks": [{"reg": "CLOCK_50"}]}}
+gd5 {"kind": "pll", "outs": [{"mul": 1, "div": 2}], "data": {"src": "c[0]", "sinks": [{"lut": "mux"}]}}
+gd6 {"kind": "div", "data": {"src": "CLOCK_50", "sinks": [{"lut": "xor"}]}}
+gd7 {"kind": "pll", "outs": [{"mul": 1, "div": 2}], "data": {"src": "c[0]", "sinks": [{"inv": "PIN_B8"}]}}
+gd8 {"kind": "pll", "outs": [{"mul": 1, "div": 2}], "data": {"src": "c[0]", "sinks": [{"pin": "PIN_A5"}, {"pin": "PIN_AE12"}, {"pin": "PIN_J1"}, {"pin": "PIN_D25"}]}}
+gd9 {"kind": "pll", "outs": [{"mul": 1, "div": 2}, {"mul": 1, "div": 1}], "data": {"src": "c[0]", "sinks": [{"pin": "PIN_B8"}, {"lut": "and"}]}}
+gd10 {"kind": "none", "data": {"src": "CLOCK_50", "sinks": [{"pin": "PIN_B8"}, {"lut": "and"}]}}
+gd11 {"kind": "pll", "outs": [{"mul": 1, "div": 2}], "cnt": false, "data": {"src": "c[0]", "sinks": [{"pin": "PIN_B8"}]}}
+gd12 {"kind": "div", "data": {"src": "div[3]", "sinks": [{"pin": "PIN_B8"}, {"lut": "and"}]}}
+gd13 {"kind": "pll", "outs": [{"mul": 1, "div": 2}, {"mul": 1, "div": 1}], "data": {"src": "c[0]", "sinks": [{"reg": "c[1]"}]}}
+gd14 {"kind": "div", "data": {"src": "CLOCK_50", "sinks": [{"reg": "div[3]"}, {"pin": "PIN_B8"}]}}
+gd15 {"kind": "pll", "outs": [{"mul": 1, "div": 2}, null, {"mul": 1, "div": 2}], "extout": "PIN_AA7", "data": {"src": "c[0]", "sinks": [{"pin": "PIN_B8"}, {"pin": "PIN_A5"}]}}

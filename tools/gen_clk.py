@@ -11,6 +11,7 @@ Config keys:
                    (examples/de2-jtag-counter's shape, clocked on TCK)
            "ena"   a cycloneii_clkctrl with its enable from a switch, on
                    CLOCK_50 (`src`: "pin") or a divided clock ("core")
+           "none"  just the CLOCK_50 pin (for `data`)
            "pll"   one altpll (keys below), each used output clocking a
                    counter shown on the LEDs
   at       clock control location for div/ena, e.g. "CLKCTRL_G9"
@@ -19,6 +20,7 @@ Config keys:
     outs     list of {"mul": m, "div": d, "phase": ps (string, ps),
              "duty": %} for c0, c1, c2 (null skips that output)
     mode     altpll operation_mode: "NORMAL" (default), "NO_COMPENSATION"
+    cnt      false: no counters on the outputs (they drive only `data`)
     locked   lock output to LEDG[0]
     areset   areset from KEY[0] (inverted, active-low key)
     pfdena   pfdena from SW[17]
@@ -27,6 +29,14 @@ Config keys:
     at       PLL location, e.g. "PLL_1"
     atom     instantiate cycloneii_pll with these parameters instead of
              altpll (outs then only says which outputs get a counter)
+  data     a global clock used as data, after any kind:
+           {"src": expr (e.g. "c[0]", "CLOCK_50"), "sinks": [...]}, each sink
+             {"pin": "PIN_B8"}           output GDATA<i> = src on that pin
+             {"lut": "and"|"xor"|"mux"}  a LEDG pin = src & SW[0], src ^ SW[0],
+                                         SW[0] ? src : SW[1]
+             {"inv": "PIN_B8"}           output GDATA<i> = ~src
+             {"reg": clk}                a register samples src on posedge clk,
+                                         shown on a LEDG pin
 """
 import json, pathlib, sys
 
@@ -157,7 +167,7 @@ elif kind == "pll":
     v.append("    pll (" + ", ".join(conns) + ");")
     leds = []
     for i, o in enumerate(outs):
-        if o:
+        if o and cfg.get("cnt", True):
             v += [f"  reg [23:0] cnt{i} = 0;", f"  always @(posedge c[{i}]) cnt{i} <= cnt{i} + 1'b1;"]
             leds += [f"cnt{i}[{23 - k}]" for k in range(6)]
     led(leds)
@@ -169,8 +179,32 @@ elif kind == "pll":
         qsf.append(f"set_location_assignment {cfg['extout']} -to PLL_OUT")
     if "at" in cfg:
         qsf.append(f"set_location_assignment {cfg['at']} -to {'pll' if 'atom' in cfg else 'pll|pll'}")
+elif kind == "none":
+    pin_in("CLOCK_50", "N2")
 else:
     sys.exit(f"unknown kind {kind}")
+
+if "data" in cfg:
+    src = cfg["data"]["src"]
+    for i, sk in enumerate(cfg["data"]["sinks"]):
+        if "pin" in sk or "inv" in sk:
+            ports.add(f"output GDATA{i}")
+            v.append(f"  assign GDATA{i} = {'~' if 'inv' in sk else ''}{src};")
+            qsf.append(f"set_location_assignment {sk.get('pin') or sk['inv']} -to GDATA{i}")
+            continue
+        for k in (0, 1):
+            pin_in(f"SW[{k}]", SW[k])
+            ports.discard(f"input SW[{k}]")
+        ports.discard("input [0:0] SW")
+        ports.add("input [1:0] SW")
+        if "lut" in sk:
+            e = {"and": f"{src} & SW[0]", "xor": f"{src} ^ SW[0]", "mux": f"SW[0] ? {src} : SW[1]"}[sk["lut"]]
+        else:
+            v += [f"  reg gd{i} = 0;", f"  always @(posedge {sk['reg']}) gd{i} <= {src};"]
+            e = f"gd{i}"
+        ports.add(f"output GLED{i}")
+        v.append(f"  assign GLED{i} = {e};")
+        qsf.append(f"set_location_assignment PIN_{LEDG[1 + i]} -to GLED{i}")
 
 out.mkdir(parents=True, exist_ok=True)
 (out / "top.v").write_text(f"module top({', '.join(sorted(ports))});\n" + "\n".join(v) + "\nendmodule\n")
