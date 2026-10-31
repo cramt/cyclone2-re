@@ -73,6 +73,7 @@ pub fn from_atoms(atoms: &[Atom], sigs: &[Signal]) -> Result<(Vec<Pll>, Vec<Stri
         let r: f64 = param(a, "loop_filter_r")?.parse()?;
         let n = num(a, "n")? as u8;
         let config = Config {
+            inclk_period_ps: num(a, "inclk0_input_frequency")?,
             n,
             m,
             m_initial: num(a, "m_initial")? as u8,

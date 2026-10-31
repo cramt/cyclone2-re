@@ -577,11 +577,11 @@ this repo's `quartus/pll.rs`. **[obs]** unless marked.
 | counter mode (`*_MULT_FACTOR`) | even 0, odd 2, bypass 1 (counts 0); an unused counter 3, counts 15/15, preset 0 |
 | `*_PRESET` | the `initial` count; `OUTPUT_COUNTER_PHASE`, `M_TAB_SELECT` the VCO tap (`ph`) |
 | n (`N_MULT_FACTOR`, `N_DIVIDED_BY`) | n = 1: 1, 0; n = 2, 3, 4: 0 and 3, 1, 0 |
-| `VCO_PHASE_CONTROL` | a bit per VCO tap any counter uses |
+| `VCO_PHASE_CONTROL` | a bit per VCO tap any counter (m included) uses; with post-scale 2, tap t also sets bit 2t mod 8, and bit 2t − 7 when 2t ≥ 8 (k1-k7) |
 | `VCO_DIVIDE_BY_2` | the atom's `vco_post_scale` = 2 |
 | `CHARGE_PUMP_CURRENT` | 53 µA: 4, 80 µA: 7 |
 | `LOOP_FILTER_R`, `_C` | 1 kΩ: 0, 2.5 kΩ: 3; 3 pF: 0 |
-| `SELECT_LOCK_WINDOW` (and `_FOR_FB`) | by m × post-scale: 3 at 4, 4 to 6, 7 to 8, 8 to 10, 11 to 16, 15 above |
+| `SELECT_LOCK_WINDOW` (and `_FOR_FB`) | by the phase-detector period (input period × n): 3 to 5 ns, 4 to 7.5, 7 to 10, 8 to 12.5, 11 to 20, 15 above (the m sweep, lw*) |
 | `USAGE_MODE`, `FEEDBACK_SELECT`, `FB_COMP_DELAY` | normal: 1, 1, 44; no compensation: 0, 0, 0 |
 | `CLOCK_SELECT` 0 | one-hot: the clock pin's index on its side |
 | `ENABLE_PLL`, `USE_ENABLE_PIN`, `GLOCK_COUNTER_ENABLE`, `LOCK_SEL_GATE_CONF_DONE`, `LOCK_MODE` | 1, 1, 1, 1, 3 in every design |
@@ -603,7 +603,31 @@ this repo's `quartus/pll.rs`. **[obs]** unless marked.
   designs byte-identical in `cram roundtrip`; p12 (counter 2 also onto the
   `PLL1_OUT` pin) was not modelled then (external clock output, below).
   m = 2, 3 didn't compile (Quartus was killed by the host), so the lock
-  window below m = 4 is unknown.
+  window below 5 ns is unknown.
+- **Phase shifts, negative ones included** (2026-10-31, altpll designs
+  q1-q3, r1-r13, s1-s10, k1-k8, t16-t40 from CLOCK_50 and atom designs
+  lw1-lw4, lwb*, all in `tools/clk_jobs.txt`; chipsmith's `pll.rs`
+  tests carry what Quartus fit). A shift is a whole number of eighths of the counters'
+  clock (`f_in · m / n`): whole cycles into a counter's `initial`, the rest
+  onto its tap (`ph`). Quartus never folds a negative shift into the
+  period: it delays the feedback counter by the most negative output's
+  shift (`m_initial`, `m_ph`) and every output by the same, so the outputs
+  lead the input (q1: -3 ns at a 1000 MHz VCO is `m_initial` 4; q2: c2 at
+  -1.5 ns, c0 at 0 is `m_initial` 2, `m_ph` 4, c0 `initial` 2, `ph` 4; r8:
+  -12 ns at 100 MHz is `m_initial` 13). A preset holds 1-16 cycles plus a
+  tap (t18: `initial` 16, `ph` 1). The counters are picked by: post-scale
+  1 over 2, then the least summed phase error (rounded to the nearest
+  tap), then the VCO nearest 800 MHz, then the smallest n (+100 ps at 100
+  MHz: m 20; +700 ps: m 18, 694 ps; 1/1 at +333 ps: m 15; s10 settles sum
+  against max error). With post-scale 2 the VCO range is 600-1000 MHz
+  (the atom's `vco_min`/`vco_max` 2000/3333 ps after the post-scale): 10
+  MHz at -2 ns takes m 6 (-2083 ps) over an exact VCO at 500 MHz. A shift
+  beyond the presets at every post-scale-1 VCO is clamped with warning
+  15559 (t40: -40 ns made -30 ns, though post-scale 2 hits -40 ns);
+  chipsmith refuses it instead. The lock window goes by the
+  phase-detector period, not m: the sweep ran the VCO at 800 MHz, where
+  the two move together (lw1/lw2/lw4: m 18, 10 and 20 at 20 ns all pick
+  11). All 46 designs are byte-identical in `cram roundtrip`.
 - **External clock output** (2026-10-30). Counter 2 is the only one wired
   to its PLL's `PLL<n>_OUT` pin (PLL_1's is PIN_AA7, the DE2's DRAM_CLK):
   `PLL_BUFFER` 2 → `CLKBUF_IN` of a clock control of its own (Quartus
@@ -616,16 +640,14 @@ this repo's `quartus/pll.rs`. **[obs]** unless marked.
   left alone (no `IO_DATA_INVERT`), found as the whole residual of a
   Quartus design with the pin (100 MHz, -3 ns) assembled without it.
   chipsmith's flow builds it (CLK2 to PIN_AA7) Quartus byte-identical.
-  That Quartus design itself still misses two lock-window bits in `cram
-  roundtrip`: its -3 ns shift moves the feedback counter (m 20,
-  `m_initial` 4) and Quartus picks `SELECT_LOCK_WINDOW` 11 where the m
-  sweep has 15 at m = 20. Negative shifts aren't modelled (chipsmith
-  rejects them).
+  That Quartus design itself missed two lock-window bits in `cram
+  roundtrip` until the lock window went by the phase-detector period
+  (above).
 
 Not covered: LAB clocks from local routing rather than a global, two
 different aclr signals in one LAB, inverted aclr, a second clock domain
 sharing a buffer, `LE_USE_REG_CASCADE_ARM` (never seen changing),
-negative PLL phase shifts, clock switchover, a PLL's
+clock switchover, a PLL's
 `clkena` outputs (M4K: [below](#m4k-ram-blocks-phase-5)). These are flagged as `unmodelled` rather than
 guessed.
 
