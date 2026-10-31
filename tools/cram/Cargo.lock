@@ -48,7 +48,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "chipsmith-cyclone2"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=71882bbf6036199178ee4603bb5e0f0ed9eb3097#71882bbf6036199178ee4603bb5e0f0ed9eb3097"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c6434e53f4890e009ce3391034c2066c5aef95e8#c6434e53f4890e009ce3391034c2066c5aef95e8"
 dependencies = [
  "anyhow",
  "chipsmith-jtag",
@@ -66,7 +66,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-jtag"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=71882bbf6036199178ee4603bb5e0f0ed9eb3097#71882bbf6036199178ee4603bb5e0f0ed9eb3097"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c6434e53f4890e009ce3391034c2066c5aef95e8#c6434e53f4890e009ce3391034c2066c5aef95e8"
 dependencies = [
  "anyhow",
  "rusb",
@@ -75,7 +75,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-netlist"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=71882bbf6036199178ee4603bb5e0f0ed9eb3097#71882bbf6036199178ee4603bb5e0f0ed9eb3097"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c6434e53f4890e009ce3391034c2066c5aef95e8#c6434e53f4890e009ce3391034c2066c5aef95e8"
 dependencies = [
  "rustc-hash",
  "serde",
@@ -86,7 +86,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-place"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=71882bbf6036199178ee4603bb5e0f0ed9eb3097#71882bbf6036199178ee4603bb5e0f0ed9eb3097"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c6434e53f4890e009ce3391034c2066c5aef95e8#c6434e53f4890e009ce3391034c2066c5aef95e8"
 dependencies = [
  "rayon",
 ]
@@ -94,7 +94,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-route"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=71882bbf6036199178ee4603bb5e0f0ed9eb3097#71882bbf6036199178ee4603bb5e0f0ed9eb3097"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c6434e53f4890e009ce3391034c2066c5aef95e8#c6434e53f4890e009ce3391034c2066c5aef95e8"
 dependencies = [
  "anyhow",
  "lzma-rust2",
@@ -105,7 +105,7 @@ dependencies = [
 [[package]]
 name = "chipsmith-synth"
 version = "0.1.0"
-source = "git+https://github.com/A-H-Technology/chipsmith?rev=71882bbf6036199178ee4603bb5e0f0ed9eb3097#71882bbf6036199178ee4603bb5e0f0ed9eb3097"
+source = "git+https://github.com/A-H-Technology/chipsmith?rev=c6434e53f4890e009ce3391034c2066c5aef95e8#c6434e53f4890e009ce3391034c2066c5aef95e8"
 dependencies = [
  "anyhow",
  "chipsmith-netlist",
