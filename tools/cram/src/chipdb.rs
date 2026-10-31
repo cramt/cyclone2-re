@@ -472,7 +472,16 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
                 // The I/O registers: the input register's clock and output,
                 // and the clock the output and OE registers share
                 // (chipsmith `bitstream::io`).
-                for (pin, out) in [("INCLK", false), ("OUTCLK", false), ("REGOUT", true)] {
+                // Their clock enables and the reset they share, LAB lines
+                // into the cell's source muxes (`IoDb::control_sources`).
+                for (pin, out) in [
+                    ("INCLK", false),
+                    ("OUTCLK", false),
+                    ("REGOUT", true),
+                    ("INCLKENA", false),
+                    ("OUTCLKENA", false),
+                    ("ARESET", false),
+                ] {
                     let w = format!("{bel}.{pin}");
                     t.wire(&w, "IOE_INTERNAL");
                     pins.push((pin.into(), w, out));
@@ -511,11 +520,16 @@ pub fn export(db: &Db, w: &mut impl Write) -> Result<()> {
             // the local lines of the tile to the right (observed on every
             // column output and tri-state pin of the fuzz designs: rcf
             // IO_DATAOUT and IO_OE_PIN at X+1).
+            // The register controls come from the same tile's lines (ioce
+            // fuzz designs: rcf IO_CEIN_PIN, IO_CEOUT_PIN, IO_ACLR_PIN in
+            // IO_DATAOUT's tile, every pin of e1-e16).
             let ox = px + u32::from(p.ioe.block == BLOCK_COL && pz < 2);
-            for (sink, lines) in [(&dout, db.io.data_sources(p)), (&oe, db.io.oe_sources(p))] {
+            let controls = db.io.control_sources(p).map(|(pin, lines)| (format!("{bel}.{pin}"), lines));
+            let sinks = [(dout.clone(), db.io.data_sources(p)), (oe.clone(), db.io.oe_sources(p))].into_iter().chain(controls);
+            for (sink, lines) in sinks {
                 for l in lines {
                     let g = alias_g(&mut ltiles, &mut members, (px, py), find(ox, py, 276, 0, l as i16)?);
-                    ltiles.get_mut(&(px, py)).unwrap().pip(&g, sink);
+                    ltiles.get_mut(&(px, py)).unwrap().pip(&g, &sink);
                 }
             }
         }

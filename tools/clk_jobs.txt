@@ -129,3 +129,13 @@ gd12 {"kind": "div", "data": {"src": "div[3]", "sinks": [{"pin": "PIN_B8"}, {"lu
 gd13 {"kind": "pll", "outs": [{"mul": 1, "div": 2}, {"mul": 1, "div": 1}], "data": {"src": "c[0]", "sinks": [{"reg": "c[1]"}]}}
 gd14 {"kind": "div", "data": {"src": "CLOCK_50", "sinks": [{"reg": "div[3]"}, {"pin": "PIN_B8"}]}}
 gd15 {"kind": "pll", "outs": [{"mul": 1, "div": 2}, null, {"mul": 1, "div": 2}], "extout": "PIN_AA7", "data": {"src": "c[0]", "sinks": [{"pin": "PIN_B8"}, {"pin": "PIN_A5"}]}}
+# PLL_4 (bottom right) from each bottom clock pin, and every PLL's external clock output left to the fitter
+q4a {"kind": "pll", "clk": "CLK_AE14", "outs": [{"mul": 2, "div": 1}, null, {"mul": 1, "div": 2}], "extout": true, "at": "PLL_4"}
+q4b {"kind": "pll", "clk": "CLK_AF14", "outs": [{"mul": 2, "div": 1}, null, {"mul": 1, "div": 2}], "extout": true, "at": "PLL_4"}
+q4c {"kind": "pll", "clk": "CLK_AD13", "outs": [{"mul": 2, "div": 1}, null, {"mul": 1, "div": 2}], "extout": true, "at": "PLL_4"}
+q4d {"kind": "pll", "clk": "CLK_AC13", "outs": [{"mul": 2, "div": 1}, null, {"mul": 1, "div": 2}], "extout": true, "at": "PLL_4"}
+q4e {"kind": "pll", "clk": "CLK_AE14", "outs": [{"mul": 3, "div": 2}]}
+q4f {"kind": "pll", "clk": "CLK_AF14", "outs": [{"mul": 2, "div": 1}, {"mul": 1, "div": 2}, {"mul": 4, "div": 5}], "locked": true, "areset": true, "at": "PLL_4"}
+q1x {"kind": "pll", "outs": [{"mul": 2, "div": 1}, null, {"mul": 1, "div": 2}], "extout": true, "at": "PLL_1"}
+q2x {"kind": "pll", "clk": "EXT_CLOCK", "outs": [{"mul": 2, "div": 1}, null, {"mul": 1, "div": 2}], "extout": true, "at": "PLL_2"}
+q3x {"kind": "pll", "clk": "CLOCK_27", "outs": [{"mul": 2, "div": 1}, null, {"mul": 1, "div": 2}], "extout": true, "at": "PLL_3"}

@@ -5,7 +5,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use std::collections::HashMap;
 
-use chipsmith_cyclone2::bitstream::io::{Dir, InReg, Input, IoReg, OutData, Output, OutputEnable, PinUse, Standard, UnusedPins};
+use chipsmith_cyclone2::bitstream::io::{Dir, InReg, Input, IoClock, IoControl, IoReg, OutData, Output, OutputEnable, PinUse, Standard, UnusedPins};
 
 use crate::{rcf, vo};
 
@@ -58,7 +58,12 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
                 pll_clock.insert(d.cell.clone());
                 continue;
             }
-            if !["IO_DATAOUT", "IO_OE_PIN"].contains(&s.resources[from].kind.as_str()) {
+            // Output data and enable, and the register controls (clock
+            // enables, asynchronous reset, synchronous clear), all from a
+            // local line through the cell's source muxes.
+            if !["IO_DATAOUT", "IO_OE_PIN", "IO_CEIN_PIN", "IO_CEOUT_PIN", "IO_ACLR_PIN", "IO_SCLR_PIN"]
+                .contains(&s.resources[from].kind.as_str())
+            {
                 continue;
             }
             let l = s.parents[from].map(|p| &s.resources[p]).filter(|r| r.kind == "LOCAL_INTERCONNECT");
@@ -80,19 +85,44 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
         let pin = a.loc.strip_prefix("PIN_").with_context(|| format!("{}: location {}", a.name, a.loc))?.to_string();
         let port = a.port("padio").with_context(|| format!("{}: no padio", a.name))?.to_string();
         let standard = standard(a.note("I/O Standard").with_context(|| format!("{}: no I/O standard", a.name))?)?;
-        for p in ["areset", "sreset"] {
-            ensure!(a.net(p).is_none(), "{}: I/O register {p} isn't modelled", a.name);
-        }
-        for p in ["inclkena", "outclkena"] {
-            ensure!(a.port(p) == Some("vcc"), "{}: I/O register {p} isn't modelled", a.name);
-        }
-        // `which`: input, output or oe; `clk`: the rcf sink of its clock.
-        let reg = |which: &str, clk: &str| -> Result<Option<IoReg>> {
-            if a.params.get(&format!("{which}_register_mode")).is_none_or(|m| m != "register") {
+        // A register control from the rcf (the local line into the cell's
+        // mux for it) and the netlist (`!net`: inverted in the cell).
+        let control = |p: &str, sink: &str| -> Result<Option<IoControl>> {
+            let Some(n) = a.net(p) else { return Ok(None) };
+            let line = *lines.get(&(port.clone(), sink.to_string())).with_context(|| format!("{}: {sink} not in the rcf", a.name))?;
+            Ok(Some(IoControl { line, inverted: n.starts_with('!') }))
+        };
+        let areset = control("areset", "ARESET")?;
+        let sclr = control("sreset", "SRESET")?;
+        // `which`: input, output or oe; `clk`: the rcf sink of its clock,
+        // `ena` its enable port.
+        let reg = |which: &str, clk: &str, ena: &str| -> Result<Option<IoReg>> {
+            let param = |k: &str| a.params.get(&format!("{which}_{k}")).map(String::as_str);
+            if param("register_mode") != Some("register") {
                 return Ok(None);
             }
-            let clock = *clocks.get(&(port.clone(), clk.to_string())).with_context(|| format!("{}: {clk} not in the rcf", a.name))?;
-            Ok(Some(IoReg { clock, powers_up_high: a.params.get(&format!("{which}_power_up")).is_some_and(|v| v == "high") }))
+            let buffer = *clocks.get(&(port.clone(), clk.to_string())).with_context(|| format!("{}: {clk} not in the rcf", a.name))?;
+            let powers_up_high = param("power_up") == Some("high");
+            let inverted = a.port(&clk.to_lowercase()).is_some_and(|c| c.starts_with('!'));
+            // The output side's one enable line: a register not using it
+            // is `tie_off_<which>_clock_enable` (held-out ioce h1, v1).
+            let tied = a.params.get(&format!("tie_off_{which}_clock_enable")).is_some_and(|v| v == "true");
+            let enable = control(&format!("{}ena", clk.to_lowercase()), ena)?.filter(|_| !tied);
+            let areset = match param("async_reset") {
+                None | Some("none") => None,
+                // The cell's reset restores the power-up value.
+                Some(m @ ("clear" | "preset")) => {
+                    ensure!((m == "preset") == powers_up_high, "{}: {which} {m} with power-up {powers_up_high}", a.name);
+                    Some(areset.with_context(|| format!("{}: {which} {m} without areset", a.name))?)
+                }
+                Some(m) => bail!("{}: {which}_async_reset {m:?}", a.name),
+            };
+            let sclr = match param("sync_reset") {
+                None | Some("none") => None,
+                Some("clear") => Some(sclr.with_context(|| format!("{}: {which} sync clear without sreset", a.name))?),
+                Some(m) => bail!("{}: {which}_sync_reset {m:?} isn't modelled", a.name),
+            };
+            Ok(Some(IoReg { clock: IoClock { buffer, inverted, enable }, powers_up_high, areset, sclr }))
         };
         let input = || -> Result<Input> {
             // The rcf names the input's core net: the pin itself (or the
@@ -102,7 +132,7 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
                 nets.iter().flatten().filter_map(|n| datain.get(*n)).fold([false; 2], |acc, d| [acc[0] | d[0], acc[1] | d[1]])
             };
             let comb = paths(&[Some(port.as_str()), a.net("combout")]);
-            let reg = reg("input", "INCLK")?.map(|reg| InReg { reg, paths: paths(&[a.net("regout")]) });
+            let reg = reg("input", "INCLK", "INCLKENA")?.map(|reg| InReg { reg, paths: paths(&[a.net("regout")]) });
             Ok(Input { comb, reg })
         };
         let output = || -> Result<Output> {
@@ -112,7 +142,7 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
             };
             // `!net`: the IOE inverts (quartus_map moves inverters feeding
             // pins, and an OE's, into it).
-            let data_reg = reg("output", "OUTCLK")?;
+            let data_reg = reg("output", "OUTCLK", "OUTCLKENA")?;
             let data = match (a.port("datain"), lines.get(&(port.clone(), "DATAIN".into()))) {
                 (Some(c @ ("gnd" | "vcc")), _) if data_reg.is_none() => OutData::Const(c == "vcc"),
                 (_, None) if data_reg.is_none() && pll_clock.contains(&port) => OutData::PllClock,
@@ -120,7 +150,7 @@ pub fn pin_uses(atoms: &[vo::Atom], sigs: &[rcf::Signal], qsf: &str) -> Result<V
                 (d, _) => bail!("{}: output data {d:?} neither routed nor constant (registered {})", a.name, data_reg.is_some()),
             };
             let open_drain = a.params.get("open_drain_output").is_some_and(|v| v == "true");
-            let oe_reg = reg("oe", "OUTCLK")?;
+            let oe_reg = reg("oe", "OUTCLK", "OUTCLKENA")?;
             let enable = match (a.port("oe"), lines.get(&(port.clone(), "OE".into()))) {
                 (Some("vcc"), _) if oe_reg.is_none() => if open_drain { OutputEnable::OpenDrain } else { OutputEnable::Always },
                 (Some("gnd"), _) if oe_reg.is_none() && !open_drain => OutputEnable::Never,

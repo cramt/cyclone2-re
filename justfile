@@ -62,6 +62,10 @@ m4k-fuzz out jobs:
 clk-fuzz out jobs:
     grep -v '^#' {{jobs}} | while read -r name cfg; do printf '%s\0%s\0' "$name" "$cfg"; done | xargs -0 -n 2 -P 3 sh -c 'tools/clk_fuzz.sh {{out}}/$0 "$1"'
 
+# I/O-cell register control fuzz: one design per `<name> <json config>` line of a jobs file (tools/gen_ioce.py keys)
+ioce-fuzz out jobs:
+    grep -v '^#' {{jobs}} | while read -r name cfg; do printf '%s\0%s\0' "$name" "$cfg"; done | xargs -0 -n 2 -P 3 sh -c 'tools/ioce_fuzz.sh {{out}}/$0 "$1"'
+
 # Assemble each design dir from the model alone and compare with Quartus's RBF
 roundtrip +dirs:
     cargo build --release --quiet --manifest-path tools/cram/Cargo.toml
