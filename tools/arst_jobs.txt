@@ -1,0 +1,20 @@
+# Asynchronous resets on core LE registers (tools/gen_arst.py), pinned into LAB X20 Y8 with the switch kept off the global network unless said: a0 active high, then one change each
+a0 {"groups": [{"kind": "cnt", "w": 16, "clr": "s1", "at": [20, 8, 0]}], "global": {"s1": false}}
+a1 {"groups": [{"kind": "cnt", "w": 16, "clr": "~s1", "at": [20, 8, 0]}], "global": {"s1": false}}
+a2 {"groups": [{"kind": "reg", "w": 8, "clr": "~s1", "at": [20, 8, 0]}], "global": {"s1": false}}
+a2h {"groups": [{"kind": "reg", "w": 8, "clr": "s1", "at": [20, 8, 0]}], "global": {"s1": false}}
+a3 {"groups": [{"kind": "reg", "w": 8, "pre": "~s1", "at": [20, 8, 0]}], "global": {"s1": false}}
+a3h {"groups": [{"kind": "reg", "w": 8, "pre": "s1", "at": [20, 8, 0]}], "global": {"s1": false}}
+a4 {"groups": [{"kind": "cnt", "w": 8, "clr": "s1", "at": [20, 8, 0]}, {"kind": "cnt", "w": 8, "clr": "~s1", "at": [20, 8, 8]}], "global": {"s1": false}}
+a5 {"groups": [{"kind": "cnt", "w": 8, "clr": "s1", "at": [20, 8, 0]}, {"kind": "cnt", "w": 8, "clr": "~s5", "at": [20, 8, 8]}], "global": {"s1": false, "s5": false}}
+a6 {"groups": [{"kind": "cnt", "w": 8, "clr": "~s1", "at": [20, 8, 0]}, {"kind": "cnt", "w": 8, "clr": "~s5", "at": [20, 8, 8]}], "global": {"s1": false, "s5": false}}
+a6h {"groups": [{"kind": "cnt", "w": 8, "clr": "s1", "at": [20, 8, 0]}, {"kind": "cnt", "w": 8, "clr": "s5", "at": [20, 8, 8]}], "global": {"s1": false, "s5": false}}
+a7 {"groups": [{"kind": "cnt", "w": 16, "clr": "~s1", "at": [20, 8, 0]}], "global": {"s1": true}}
+a8 {"groups": [{"kind": "cnt", "w": 16, "clr": "s1", "at": [20, 8, 0]}], "global": {"s1": true}}
+a9 {"groups": [{"kind": "cnt", "w": 16, "clr": "~(s1&s4)", "at": [20, 8, 0]}], "global": {"s1": false}}
+a10 {"groups": [{"kind": "cnt", "w": 24, "clr": "~s8"}]}
+a11 {"groups": [{"kind": "cnt", "w": 16, "clr": "~s1", "ce": "s0", "at": [20, 8, 0]}], "global": {"s1": false}}
+a12 {"groups": [{"kind": "cnt", "w": 8, "clr": "s1", "at": [20, 8, 0]}, {"kind": "cnt", "w": 8, "pre": "~s1", "at": [20, 8, 8]}], "global": {"s1": false}}
+# Which clear takes clear line 0: a4 and a5 with the register groups swapped
+a4r {"groups": [{"kind": "cnt", "w": 8, "clr": "~s1", "at": [20, 8, 0]}, {"kind": "cnt", "w": 8, "clr": "s1", "at": [20, 8, 8]}], "global": {"s1": false}}
+a5r {"groups": [{"kind": "cnt", "w": 8, "clr": "~s5", "at": [20, 8, 0]}, {"kind": "cnt", "w": 8, "clr": "s1", "at": [20, 8, 8]}], "global": {"s1": false, "s5": false}}

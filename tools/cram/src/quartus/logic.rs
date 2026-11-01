@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, HashMap};
 
 use chipsmith_cyclone2::bitstream::logic::{
-    clkctrl_select_code, clock_slots, Aclr, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic,
+    clkctrl_select_code, clock_slots, Aclr, ClkCtrl, Clear, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic,
     Lut, Reg, Sload,
 };
 
@@ -190,17 +190,21 @@ pub fn from_atoms(atoms: &[Atom], sigs: &[Signal]) -> Result<(Logic, Vec<String>
             let g = glob.get(&(x, y, le));
             let k = ctl.get(&(x, y, le));
             let clock = domain(x, y, le, ff).and_then(|d| domain_index.get(&((x, y), d))).copied().unwrap_or(0);
-            if inverted(ff, "aclr") {
-                unmodelled.push(format!("{}: inverted aclr", ff.name));
-            }
             let aclr = if ff.net("aclr").is_some() {
-                let a = match (k.and_then(|k| k.get("ACLR")), g.and_then(|g| g.get("ACLR"))) {
+                let src = match (k.and_then(|k| k.get("ACLR")), g.and_then(|g| g.get("ACLR"))) {
                     (Some(&p), _) => Aclr::Pia(p),
                     (None, Some(&b)) => Aclr::Global(b),
                     _ => bail!("{}: aclr route not found", ff.name),
                 };
-                set_once(&mut lab.aclr, a, "aclr", (x, y))?;
-                Some(0)
+                // Clear mux 0 reaches control lines 0 and 1, mux 1 lines 2
+                // and 3 (asmdb source maps; arst a4-a6 take one of each).
+                let j = match src {
+                    Aclr::Pia(p) if p >= 2 => 1,
+                    _ => 0,
+                };
+                let c = Clear { src, inverted: inverted(ff, "aclr") };
+                set_once(&mut lab.aclr[j], c, "aclr", (x, y))?;
+                Some(j as u8)
             } else {
                 None
             };

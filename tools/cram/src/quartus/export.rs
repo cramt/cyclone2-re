@@ -470,8 +470,11 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                 };
                 let ena = ctl("ENA", "ENA_INV", "1'b1", &mut invert);
                 let sclr = ctl("SCLR", "SCLR_INV", "1'b0", &mut invert);
+                // An active-low clear, folded likewise into the LAB's
+                // clear-line inversion.
+                let aclr = ctl("ACLR", "ACLR_INV", "1'b0", &mut invert);
                 writeln!(v, "  .datain({d}),")?;
-                writeln!(v, "  .ena({ena}), .aclr({}), .sclr({sclr}),", net(c, "ACLR", "1'b0"))?;
+                writeln!(v, "  .ena({ena}), .aclr({aclr}), .sclr({sclr}),")?;
                 let sload = if c.conns.contains_key("SDATA") { "1'b1" } else { "1'b0" };
                 writeln!(v, "  .sdata({}), .sload({sload}),", net(c, "SDATA", "1'b0"))?;
                 writeln!(v, "  .regout({}));", net(c, "REGOUT", ""))?;
