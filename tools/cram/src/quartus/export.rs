@@ -961,6 +961,20 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
     }
     let atom = rcf_name;
     let perm = perms(&r.nets);
+    // A pad-to-core destination by the name the rcf gives it: a feeder
+    // LUT is gone in Quartus' netlist (its wirecell, or the register it
+    // fed). An assignment to a name that isn't there is ignored, and the
+    // fitter leaves that path's delay chain off (uart's KEY[1] and
+    // i2c-master's SW[17], I2C_SCL and I2C_SDA, through wirecells).
+    let sink_name = |n: &str| -> String {
+        if let Some(w) = wirecell.get(n) {
+            return w.clone();
+        }
+        match (feeder.contains_key(n), r.cells[n].bel) {
+            (true, Bel::Lut { x, y, k }) => cell_at.get(&Bel::Ff { x, y, k }).map_or_else(|| atom[n].clone(), |ff| atom[*ff].clone()),
+            _ => atom[n].clone(),
+        }
+    };
     // Every pad-to-core path at delay setting 6, the model's (and
     // Quartus' untimed) choice; with a timing constraint the fitter
     // otherwise picks per destination.
@@ -970,7 +984,7 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
             continue;
         }
         let Some(id) = c.conns.get("COMBOUT") else { continue };
-        let mut sinks: Vec<&String> = loads.get(id).into_iter().flatten().map(|(n, _)| &atom[*n]).collect();
+        let mut sinks: Vec<String> = loads.get(id).into_iter().flatten().map(|(n, _)| sink_name(n)).collect();
         sinks.sort();
         sinks.dedup();
         for s in sinks {
