@@ -1367,8 +1367,9 @@ it (warning 171167, "invalid Fitter assignments") and left the chain off.
 The assignment now names the destination as the rcf does: the wirecell,
 or for a plain feeder the register it feeds (2026-11-01). 33 of
 chipsmith's 34 DE2 examples at its branch de2-polish are byte-identical
-with it, uart and i2c-master included; picorv32x24 (28,449 LEs) hadn't
-finished Quartus' post-fit delay annotation after 1.5 hours.
+with it, uart and i2c-master included; picorv32x24 (28,449 LEs) isn't
+validated: Quartus' fit placed and routed it in minutes, then spent 7.5
+hours in post-fit delay annotation without finishing, and was stopped.
 
 Quartus' fitter accepts each placement and routing (all routes preserved,
 no legality errors) and TimeQuest reports positive setup and hold slack.
