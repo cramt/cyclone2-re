@@ -17,6 +17,8 @@ in). `db` and the reverse-engineering commands read Quartus' devinfo/cycloneii
   cram addr <flat>...                      flat CRAM address -> frame:bit
   cram routing <design dir>                routing bits an rcf sets, as fN:B
   cram lab-check                           asmdb LAB tables vs the fuzz-fit LUT geometry
+  cram lab-bits <a.rbf> <b.rbf>            differing LAB bits, by the asmdb group owning them
+                                           (arch type, group, path, mux level, bit)
   cram assemble <empty.rbf> <design dir> <out.rbf>
       empty RBF + modelled bits (routing, logic, every pin's IOE), check
       words recomputed.
@@ -64,6 +66,42 @@ fn categorise(b: FrameBit, used: &HashSet<(u32, u32)>) -> &'static str {
         Some(x) if used.contains(&(x, y)) => "used LAB",
         Some(_) => "unused LAB",
     }
+}
+
+/// Each bit inside a LAB block with the asmdb LAB groups whose offsets it
+/// is: (arch type, group index, path, mux level, position in the mux).
+#[allow(clippy::type_complexity)]
+fn lab_bits(m: &Db, bits: Vec<FrameBit>) -> Result<Vec<(FrameBit, (u32, u32), Vec<(i32, i32, usize, usize, usize)>)>> {
+    use chipsmith_cyclone2::bitstream::asmdb::arch;
+    let mut owners: BTreeMap<i32, Vec<(i32, i32, usize, usize, usize)>> = BTreeMap::new();
+    for g in m.asmdb.arch_groups.iter().filter(|g| g.block_type == arch::BLOCK_LAB) {
+        let f = lab::Feature::from(&m.asmdb, g);
+        for (p, levels) in f.paths.iter().enumerate() {
+            for (l, offs) in levels.iter().enumerate() {
+                for (i, &off) in offs.iter().enumerate() {
+                    owners.entry(off).or_default().push((g.arch_type, g.group_index, p, l, i));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for fb in bits {
+        let Some(flat) = addr::flat(fb) else { continue };
+        let row = flat / addr::COLUMNS;
+        if row < le::lab_row(35) || row >= le::lab_row(1) + le::LAB_ROWS {
+            continue;
+        }
+        let y = 35 - (row - le::lab_row(35)) / le::LAB_ROWS;
+        // A LAB block spans frames lut_frame - 22 ..= lut_frame + 12 (asmdb).
+        let frame = fb.frame as u32;
+        let Some(x) = (1..=64).find(|&x| le::lut_frame(x).is_some_and(|f| (f as i64 - 22..=f as i64 + 12).contains(&(frame as i64)))) else {
+            continue;
+        };
+        let Ok(base) = m.lab.flat(x, y, 0) else { continue };
+        let off = flat as i64 - base as i64;
+        out.push((fb, (x, y), owners.get(&(off as i32)).cloned().unwrap_or_default()));
+    }
+    Ok(out)
 }
 
 /// RE commands read Quartus' device files directly.
@@ -381,6 +419,16 @@ fn main() -> Result<()> {
                 if let Some(d) = m.io.describe(io::IoBit::Rep(rb)) {
                     println!("{rb} {}->{} {d:?}", u8::from(a.rep_get(rb)), u8::from(b.rep_get(rb)));
                 }
+            }
+        }
+        ("lab-bits", [a, b]) => {
+            // Debugging aid: differing bits of two RBFs that belong to a LAB
+            // block, named by the asmdb group (arch type, group index, path,
+            // mux level, bit) that owns their offset.
+            let m = shipped_db()?;
+            let (a, b) = (Rbf::read(Path::new(a))?, Rbf::read(Path::new(b))?);
+            for (fb, (x, y), owners) in lab_bits(&m, a.diff(&b))? {
+                println!("{fb} X{x}Y{y} {}->{} {owners:?}", u8::from(a.get(fb)), u8::from(b.get(fb)));
             }
         }
         ("svf", [rbf, out]) => std::fs::write(out, jtag::svf(&Rbf::read(Path::new(rbf))?))?,
