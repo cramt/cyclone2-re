@@ -1358,8 +1358,18 @@ re-creates it under that name wherever it likes unless the VQM already has
 it. The export names it so and places it in the feeder's LE (2026-10-29):
 chipsmith's fir lost 100 rcf routes to such re-placed cells before and none
 since. Over chipsmith's DE2 examples, the 16 random M4K designs and the
-multiplier examples, 41 of 43 are now byte-identical; uart and i2c-master
-differ in 2 and 6 I/O-row bits (chipsmith's README).
+multiplier examples, 41 of 43 were then byte-identical; uart and i2c-master
+differed in 2 and 6 I/O-row bits. Those were the input delay chain
+(`PAD_TO_CORE_DELAY` 110 in ours, 000 in Quartus') of pins read only
+through such a wirecell: the export's `PAD_TO_CORE_DELAY` assignment named
+the feeder LUT, which Quartus' netlist doesn't have, so the fitter ignored
+it (warning 171167, "invalid Fitter assignments") and left the chain off.
+The assignment now names the destination as the rcf does: the wirecell,
+or for a plain feeder the register it feeds (2026-11-01). 33 of
+chipsmith's 34 DE2 examples at its branch de2-polish are byte-identical
+with it, uart and i2c-master included; picorv32x24 (28,449 LEs) isn't
+validated: Quartus' fit placed and routed it in minutes, then spent 7.5
+hours in post-fit delay annotation without finishing, and was stopped.
 
 Quartus' fitter accepts each placement and routing (all routes preserved,
 no legality errors) and TimeQuest reports positive setup and hold slack.
