@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use chipsmith_cyclone2::bitstream::{self as bitstream, addr, blank, io, jtag, lab, le, nextpnr, phys::{Bits, Db, PhysDesign}, rbf::{self, FrameBit, Rbf, RepBit}};
 use cram::quartus;
 
+mod source_digest;
+
 fn usage() -> ! {
     eprintln!(
         "usage. pack, quartus-export, blank and chipdb read the device database in
@@ -31,6 +33,9 @@ in). `db` and the reverse-engineering commands read Quartus' devinfo/cycloneii
                                            (top.vqm, assignments.qsf, routing.rcf)
   cram blank <out.rbf>                     base image built from the device DB alone; any
                                            <empty.rbf> argument can be `-` for it
+  cram source-digest                       digest of the sources this cram was built from; a
+                                           cram under a checkout's tools/cram/target refuses to
+                                           run when it differs from the checkout's
   cram svf <in.rbf> <out.svf>              JTAG configuration of the RBF, CONF_DONE checked
                                            (an RBF itself is not a JTAG stream)
   cram chipdb <out.txt>                    nextpnr chip database description (for
@@ -317,7 +322,42 @@ fn lab_check() -> Result<()> {
     Ok(())
 }
 
+/// A cram run from a checkout's tools/cram/target/<profile>/ must be built
+/// from that checkout's sources: the scripts run it from there, and a copy
+/// of an older build silently exports and checks with old code. Run as a
+/// path through a symlink (to a nix build, say), the link's checkout counts.
+fn check_built_from_checkout() -> Result<()> {
+    if std::env::var_os("CRAM_ALLOW_STALE").is_some() {
+        return Ok(());
+    }
+    let invoked = std::env::args_os().next().map(PathBuf::from).filter(|p| p.components().count() > 1);
+    let dirs = invoked
+        .and_then(|p| p.parent().and_then(|d| d.canonicalize().ok()))
+        .into_iter()
+        .chain(std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)));
+    for dir in dirs {
+        // <root>/tools/cram/target/<profile>
+        let Some(root) = dir.ancestors().nth(4) else { continue };
+        if dir.parent().and_then(Path::file_name) != Some("target".as_ref()) || !root.join("tools/cram/build.rs").is_file() {
+            continue;
+        }
+        let built = env!("CRAM_SOURCE_DIGEST");
+        let now = format!("{:016x}", source_digest::digest(root)?);
+        if now != built {
+            bail!(
+                "{} was built from other sources (digest {built}) than this checkout's tools/cram and tools/ddb ({now}): \
+                 rebuild it (`cargo build --release` in tools/cram, or copy result/bin/cram after a fresh `nix build`). \
+                 CRAM_ALLOW_STALE=1 runs it anyway.",
+                dir.join("cram").display()
+            );
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
+    check_built_from_checkout()?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else { usage() };
     match (cmd.as_str(), &args[1..]) {
@@ -431,6 +471,9 @@ fn main() -> Result<()> {
                 println!("{fb} X{x}Y{y} {}->{} {owners:?}", u8::from(a.get(fb)), u8::from(b.get(fb)));
             }
         }
+        // Scripts call it first: a binary from before the check above
+        // doesn't know it, and fails.
+        ("source-digest", []) => println!("{}", env!("CRAM_SOURCE_DIGEST")),
         ("svf", [rbf, out]) => std::fs::write(out, jtag::svf(&Rbf::read(Path::new(rbf))?))?,
         ("blank", [out]) => {
             let m = shipped_db()?;
