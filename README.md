@@ -1324,7 +1324,14 @@ which quartus_map takes as already mapped; atoms named after their output
 net, which is what the rcf calls them), location assignments for every LE,
 pin and clock control, and the routing as an rcf with physical
 `route_port`s. The oracle compiles that offline; `ROUTING_BACK_ANNOTATION`
-makes the fitter keep the routes. Results, observed:
+makes the fitter keep the routes. The cram it runs is
+`tools/cram/target/release/cram`, which refuses to run when this
+checkout's tools/cram or tools/ddb sources differ from the ones it was
+built from (a digest build.rs embeds; `CRAM_ALLOW_STALE=1` overrides), and
+the scripts call `cram source-digest` first, which a cram from before
+that check doesn't know: on 2026-11-01/02 a nix build of e6aa597 sat
+there, without de2-arstn's clear-inversion export, and sha256 seemed to
+differ from Quartus in 236 LAB bits. Results, observed:
 
 | design | LEs | nets | open build | Quartus routes kept | RBF vs Quartus | setup slack @ 50 MHz (Quartus STA) |
 |---|---|---|---|---|---|---|
