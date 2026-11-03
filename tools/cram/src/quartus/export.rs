@@ -475,8 +475,17 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                 let aclr = ctl("ACLR", "ACLR_INV", "1'b0", &mut invert);
                 writeln!(v, "  .datain({d}),")?;
                 writeln!(v, "  .ena({ena}), .aclr({aclr}), .sclr({sclr}),")?;
-                let sload = if c.conns.contains_key("SDATA") { "1'b1" } else { "1'b0" };
-                writeln!(v, "  .sdata({}), .sload({sload}),", net(c, "SDATA", "1'b0"))?;
+                // A load net from a control line, or (SDATA alone) the
+                // LAB's sload tied high.
+                let sload = match sig_of(c, "SLOAD") {
+                    Some(_) => ctl("SLOAD", "SLOAD_INV", "1'b0", &mut invert),
+                    None if c.conns.contains_key("SDATA") => "1'b1".to_string(),
+                    None => "1'b0".to_string(),
+                };
+                // A load with no SDATA loads a 1: input C left unrouted
+                // reads 1, which is how Quartus builds `.sdata(1'b1)`.
+                let unrouted = if sig_of(c, "SLOAD").is_some() { "1'b1" } else { "1'b0" };
+                writeln!(v, "  .sdata({}), .sload({sload}),", net(c, "SDATA", unrouted))?;
                 writeln!(v, "  .regout({}));", net(c, "REGOUT", ""))?;
                 writeln!(qsf, "set_location_assignment LCFF_X{x}_Y{y}_N{} -to {}", 2 * k + 1, atom[name.as_str()])?;
             }
@@ -1089,12 +1098,13 @@ pub fn to_quartus(r: &Routed, dev: &Device, io: &IoDb) -> Result<QuartusExport> 
                             }
                             continue;
                         }
-                        Wire::Le { x, y, k, pin: pin @ (LePin::Clk | LePin::Ena | LePin::Aclr | LePin::Sclr) } => {
+                        Wire::Le { x, y, k, pin: pin @ (LePin::Clk | LePin::Ena | LePin::Aclr | LePin::Sclr | LePin::Sload) } => {
                             let c = cell_at.get(&Bel::Ff { x, y, k }).context("FF at LE control")?;
                             let port = match pin {
                                 LePin::Clk => "CLK",
                                 LePin::Ena => "ENA",
                                 LePin::Aclr => "ACLR",
+                                LePin::Sload => "SLOAD",
                                 _ => "SCLR",
                             };
                             format!("dest = ( {}, {port} );", atom[*c])

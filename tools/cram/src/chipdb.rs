@@ -127,6 +127,7 @@ fn lab_tile(db: &Db) -> Result<TileType> {
     // The model drives a LAB-line clear through clear mux 0 only.
     let aclr = reachable(arch::LAB_CLEAR_FAST_MUX, 0)?;
     let sclr = reachable(arch::LAB_SYNC_CLR_FAST_MUX, 0)?;
+    let sload = reachable(arch::LAB_SYNC_LOAD_FAST_MUX_MAG, 0)?;
     let inputs: Vec<_> = (0..4).map(|p| db.lab.feature(arch::LE_LUT_INPUT, p)).collect::<Result<_>>()?;
     for k in 0..LES {
         t.wire(&format!("LL{k}"), "LOCAL_LINE");
@@ -134,7 +135,7 @@ fn lab_tile(db: &Db) -> Result<TileType> {
             t.wire(&format!("LE{k}.{p}"), "LE_INPUT");
             t.wire(&format!("LE{k}.I{p}"), "LUT_INPUT");
         }
-        for o in ["COMB", "Q", "CLK", "ENA", "ACLR", "SCLR"] {
+        for o in ["COMB", "Q", "CLK", "ENA", "ACLR", "SCLR", "SLOAD"] {
             t.wire(&format!("LE{k}.{o}"), "LE_INTERNAL");
         }
     }
@@ -169,11 +170,14 @@ fn lab_tile(db: &Db) -> Result<TileType> {
             ("ENA".into(), format!("{le}.ENA"), false),
             ("ACLR".into(), format!("{le}.ACLR"), false),
             ("SCLR".into(), format!("{le}.SCLR"), false),
+            // The LAB's synchronous load, from a control line: a register
+            // that takes it loads SDATA instead of DATAIN while it is high.
+            ("SLOAD".into(), format!("{le}.SLOAD"), false),
             // Synchronous load data: the LE's physical input C.
             ("SDATA".into(), format!("{le}.C"), false),
             ("REGOUT".into(), format!("{le}.Q"), true),
         ];
-        for (pin, srcs) in [("ENA", &ena), ("ACLR", &aclr), ("SCLR", &sclr)] {
+        for (pin, srcs) in [("ENA", &ena), ("ACLR", &aclr), ("SCLR", &sclr), ("SLOAD", &sload)] {
             for &s in srcs.iter() {
                 let src = if s < 4 { format!("CTRL{s}") } else if s < 10 { format!("BCB{}", s - 4) } else { continue };
                 t.pip(&src, &format!("{le}.{pin}"));
