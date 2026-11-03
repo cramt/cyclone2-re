@@ -21,6 +21,10 @@ mkdir -p "$out"
 blank="${CRAM_BASE:--}"
 nextpnr="${NEXTPNR:-nextpnr-himbaechel}"
 cram="$root/tools/cram/target/release/cram"
+# Refuses (and so does every cram command) when the binary isn't built from
+# this checkout's sources; a cram older than that check doesn't know the
+# command at all.
+"$cram" source-digest > /dev/null || { echo "$cram: not built from this checkout's tools/cram; rebuild it" >&2; exit 1; }
 
 pins="$design/pins.qsf"
 [[ -f "$pins" ]] || pins="$root/examples/de2.qsf"

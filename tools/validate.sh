@@ -14,6 +14,10 @@ root=$(dirname "$(dirname "$(realpath "$0")")")
 design=$(realpath "$1")
 out="$design/build"
 cram="$root/tools/cram/target/release/cram"
+# Refuses (and so does every cram command) when the binary isn't built from
+# this checkout's sources; a cram older than that check doesn't know the
+# command at all.
+"$cram" source-digest > /dev/null || { echo "$cram: not built from this checkout's tools/cram; rebuild it" >&2; exit 1; }
 q="$root/tools/quartus.sh"
 
 "$cram" quartus-export "$out/routed.json" "$out/q"
