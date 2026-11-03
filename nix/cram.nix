@@ -28,7 +28,7 @@ rustPlatform.buildRustPackage {
     # covers the whole chipsmith tree at that rev, so it changes with every
     # rev, even one that leaves chipsmith-cyclone2 alone (de3386a kept the
     # old hash, and master's cram failed to build until qor2).
-    outputHashes."chipsmith-cyclone2-0.1.0" = "sha256-MY8/SG8ipMb9g8gocd/kSyuY+GqVRGGZX05VflrR/Qg=";
+    outputHashes."chipsmith-cyclone2-0.1.0" = "sha256-w+cPSMzjo9w62JRv0k6oFfsjc2NODdsREjaoJoWEncM=";
   };
 
   postInstall = ''
