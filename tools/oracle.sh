@@ -10,9 +10,9 @@
 # file (location assignments, LUT pinning, ...). Output lands in
 # <design-dir>/build/output_files/top.{sof,rbf} plus the usual reports.
 #
-# We generate the .qsf ourselves rather than going through `chipsmith build`
+# We generate the .qsf ourselves rather than going through `chipsmith-vendor build`
 # because a manifest can't carry location assignments or Verilog sources;
-# `chipsmith run` (inside tools/quartus.sh) still does the NixOS/bubblewrap
+# `chipsmith-vendor run` (inside tools/quartus.sh) still does the NixOS/bubblewrap
 # spawning.
 set -euo pipefail
 

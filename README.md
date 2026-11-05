@@ -118,13 +118,16 @@ Details, with every claim marked observed, inferred or unknown, are in
   `quartus_cpf -c -o bitstream_compression=off top.sof top.rbf`). About 90 s
   per design; six run in parallel fine on 8 cores. It writes its own
   `.qsf`/`.qpf` because a chipsmith manifest can't carry location assignments
-  or Verilog. `chipsmith build` itself also works (VHDL only).
+  or Verilog. `chipsmith-vendor build` itself also works (VHDL only).
 - `tools/quartus.sh <tool> <args>` runs any Quartus tool through
-  `chipsmith run` inside `unshare --user --map-current-user --net`, and
-  refuses to start if any interface other than `lo` is visible. chipsmith's
+  `chipsmith-vendor run` inside `unshare --user --map-current-user --net`, and
+  refuses to start if any interface other than `lo` is visible. `chipsmith-vendor`
+  is chipsmith's vendor-tool runner (`nix build
+  github:A-H-Technology/chipsmith#chipsmith-vendor`, formerly the `chipsmith`
+  binary); `CHIPSMITH_VENDOR` points the script at another build. chipsmith's
   own bubblewrap sandbox nests inside it without changes. Both a full
-  `chipsmith build` and the oracle flow complete in there. The isolation is
-  real: a mistyped `chipsmith run` without `--backend quartus-ii-13` tried to
+  `chipsmith-vendor build` and the oracle flow complete in there. The isolation is
+  real: a mistyped `chipsmith-vendor run` without `--backend quartus-ii-13` tried to
   download Quartus Prime 23.1 and failed with a connection error.
 - Compression: Cyclone II does accept compressed bitstreams (`-o
   bitstream_compression=on` gives 248 KB instead of 856 KB, and flips bit 0 of
