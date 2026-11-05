@@ -18,4 +18,4 @@ if awk 'NR > 2 && $1 != "lo:" { found = 1 } END { exit !found }' /proc/net/dev; 
     exit 1
 fi
 
-exec chipsmith run --backend quartus-ii-13 --version 13.0sp1 "$1" -- "${@:2}"
+exec "${CHIPSMITH_VENDOR:-chipsmith-vendor}" run --backend quartus-ii-13 --version 13.0sp1 "$1" -- "${@:2}"
